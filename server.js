@@ -40,6 +40,8 @@ app.use("/api/wallet", require("./src/routes/wallet.routes"));
 app.use("/api/plans", require("./src/routes/plans.routes"));
 app.use("/api/purchase", require("./src/routes/purchase.routes"));
 app.use("/api/peyflex", require("./src/routes/peyflex.routes"));
+app.use("/api/admin", require("./src/routes/admin.routes"));
+
 
 app.use(notFound);
 app.use(errorHandler);
