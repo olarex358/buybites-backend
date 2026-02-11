@@ -17,4 +17,6 @@ const ComplaintSchema = new mongoose.Schema(
     { timestamps: true }
 );
 
+ComplaintSchema.index({ status: 1, updatedAt: -1 });
+
 module.exports = mongoose.model("Complaint", ComplaintSchema);

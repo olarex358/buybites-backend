@@ -12,4 +12,7 @@ const WalletTxSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+WalletTxSchema.index({ reference: 1 });
+WalletTxSchema.index({ createdAt: -1 });
+
 module.exports = mongoose.model("WalletTx", WalletTxSchema);
