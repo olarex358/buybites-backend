@@ -6,7 +6,11 @@ const UserSchema = new mongoose.Schema(
     pinHash: { type: String, required: true }, // secure phone-only login
     fullName: { type: String, default: "", trim: true },
     walletBalance: { type: Number, default: 0 },
-    isBlocked: { type: Boolean, default: false }
+    isBlocked: { type: Boolean, default: false },
+    failedLoginAttempts: { type: Number, default: 0 },
+lockUntil: { type: Date, default: null },
+isVerified: { type: Boolean, default: false },
+
   },
   { timestamps: true }
 );

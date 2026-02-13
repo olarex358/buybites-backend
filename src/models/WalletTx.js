@@ -8,6 +8,7 @@ const WalletTxSchema = new mongoose.Schema(
     reference: { type: String, required: true, unique: true },
     status: { type: String, enum: ["PENDING", "SUCCESS", "FAILED"], default: "PENDING" },
     meta: { type: Object, default: {} }
+
   },
   { timestamps: true }
 );

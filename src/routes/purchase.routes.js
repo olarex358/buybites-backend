@@ -13,16 +13,15 @@ const { peyflexClient } = require("../services/peyflex.service");
 
 async function atomicDebit(userId, amount) {
   // atomic: only debit if enough balance
-  const user = await User.findOneAndUpdate(
+  return User.findOneAndUpdate(
     { _id: userId, walletBalance: { $gte: amount } },
     { $inc: { walletBalance: -amount } },
     { new: true }
   );
-  return user; // null => insufficient
 }
 
-async function credit(userId, amount) {
-  await User.findByIdAndUpdate(userId, { $inc: { walletBalance: amount } });
+async function atomicCredit(userId, amount) {
+  return User.findByIdAndUpdate(userId, { $inc: { walletBalance: amount } });
 }
 
 async function sleep(ms) {
@@ -40,24 +39,46 @@ router.post("/", auth, async (req, res, next) => {
     const phone11 = cleanPhone(b.mobile_number);
     if (!phone11) return res.status(400).json({ ok: false, error: "Invalid phone" });
 
-    // Soft validation (warn)
     const networkMatch = matchesNetwork(phone11, b.network);
 
-    const plan = await DataPlan.findOne({ network: b.network, plan_code: b.plan_code, isActive: true });
+    const plan = await DataPlan.findOne({
+      network: b.network,
+      plan_code: b.plan_code,
+      isActive: true
+    });
+
     if (!plan) return res.status(400).json({ ok: false, error: "Plan not available" });
 
     const amount = Number(plan.sellPrice);
-    const ref = genRef("ORD");
 
+    // ✅ Anti double-tap: if same request exists recently, return it
+    const recent = await Order.findOne({
+      userId: req.user.sub,
+      network: b.network,
+      plan_code: b.plan_code,
+      mobile_number: phone11,
+      createdAt: { $gte: new Date(Date.now() - 90 * 1000) } // 90 seconds
+    }).sort({ createdAt: -1 });
+
+    if (recent && ["PROCESSING", "DELIVERED", "REFUNDED"].includes(recent.status)) {
+      return res.json({ ok: true, order: recent, networkMatch, deduped: true });
+    }
+
+    const orderRef = genRef("ORD");
+
+    // Create order first
     const order = await Order.create({
       userId: req.user.sub,
+      orderRef,
       network: b.network,
       mobile_number: phone11,
       plan_code: b.plan_code,
       amount,
-      status: "PROCESSING"
+      status: "PROCESSING",
+      retries: 0
     });
 
+    // Debit wallet
     const debitedUser = await atomicDebit(req.user.sub, amount);
     if (!debitedUser) {
       order.status = "FAILED";
@@ -66,16 +87,18 @@ router.post("/", auth, async (req, res, next) => {
       return res.status(400).json({ ok: false, error: "Insufficient balance", networkMatch });
     }
 
+    // Record debit tx with deterministic reference (so it can’t duplicate)
+    const debitRef = `DEB_${orderRef}`;
     await WalletTx.create({
       userId: req.user.sub,
       type: "DEBIT",
       amount,
-      reference: ref,
+      reference: debitRef,
       status: "SUCCESS",
-      meta: { orderId: String(order._id), network: b.network, plan_code: b.plan_code, phone11, networkMatch }
+      meta: { orderId: String(order._id), orderRef, network: b.network, plan_code: b.plan_code, phone11, networkMatch }
     });
 
-    // Peyflex call with retry x3
+    // Provider call with retry x3
     const api = peyflexClient();
     let lastErr = "";
     let responseData = null;
@@ -95,37 +118,46 @@ router.post("/", auth, async (req, res, next) => {
         break;
       } catch (e) {
         lastErr = e?.response?.data ? JSON.stringify(e.response.data) : e.message;
-        await sleep(600 * i); // small backoff
+        await sleep(700 * i);
       }
     }
 
-    const txt = JSON.stringify(responseData || "").toLowerCase();
     order.providerRef = responseData?.reference || responseData?.ref || "";
 
-    if (responseData && (txt.includes("success") || txt.includes("delivered"))) {
+    const txt = JSON.stringify(responseData || "").toLowerCase();
+    const isSuccess = responseData && (txt.includes("success") || txt.includes("delivered"));
+
+    if (isSuccess) {
       order.status = "DELIVERED";
       await order.save();
       return res.json({ ok: true, order, networkMatch });
     }
 
-    // fail => refund
+    // ✅ Refund (idempotent): only refund once
     order.status = "REFUNDED";
-    order.lastError = responseData ? "Provider failed" : lastErr || "Provider error";
+    order.lastError = responseData ? "Provider failed" : (lastErr || "Provider error");
     await order.save();
 
-    await credit(req.user.sub, amount);
-    await WalletTx.create({
-      userId: req.user.sub,
-      type: "CREDIT",
-      amount,
-      reference: `RF_${ref}`,
-      status: "SUCCESS",
-      meta: { orderId: String(order._id), reason: order.lastError }
-    });
+    const refundRef = `CR_${orderRef}`;
+    const alreadyRefunded = await WalletTx.findOne({ reference: refundRef }).select("_id");
+    if (!alreadyRefunded) {
+      await atomicCredit(req.user.sub, amount);
+
+      await WalletTx.create({
+        userId: req.user.sub,
+        type: "CREDIT",
+        amount,
+        reference: refundRef,
+        status: "SUCCESS",
+        meta: { orderId: String(order._id), orderRef, reason: order.lastError }
+      });
+    }
 
     return res.json({ ok: true, order, networkMatch });
 
-  } catch (e) { next(e); }
+  } catch (e) {
+    next(e);
+  }
 });
 
 router.get("/my", auth, async (req, res) => {

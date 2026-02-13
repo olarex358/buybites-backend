@@ -7,18 +7,39 @@ const WalletTx = require("../models/WalletTx");
 const { genRef } = require("../utils/ref");
 const { paystackClient } = require("../services/paystack.service");
 
+function getCallbackUrl(req) {
+  // Prefer env (prod), fallback to browser origin (dev)
+  const base =
+    (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "")
+      .split(",")[0]
+      ?.trim() ||
+    req.headers.origin ||
+    "http://127.0.0.1:5500";
+
+  return `${base.replace(/\/$/, "")}/callback.html`;
+}
+
 router.get("/balance", auth, async (req, res) => {
   const user = await User.findById(req.user.sub).select("walletBalance");
-  res.json({ ok: true, walletBalance: user.walletBalance });
+  res.json({ ok: true, walletBalance: user?.walletBalance ?? 0 });
 });
 
 router.post("/fund/init", auth, async (req, res, next) => {
   try {
-    const body = z.object({ amount: z.number().min(50) }).parse(req.body);
+    const body = z.object({ amount: z.number().min(50).max(200000) }).parse(req.body);
     const user = await User.findById(req.user.sub);
     if (!user) return res.status(404).json({ ok: false, error: "User not found" });
 
-    const ref = genRef("FUND");
+    // create unique reference (retry-safe)
+    let ref = genRef("FUND");
+    let attempts = 0;
+    while (attempts < 3) {
+      const exists = await WalletTx.findOne({ reference: ref }).select("_id");
+      if (!exists) break;
+      ref = genRef("FUND");
+      attempts++;
+    }
+
     await WalletTx.create({
       userId: user._id,
       type: "FUND",
@@ -30,16 +51,23 @@ router.post("/fund/init", auth, async (req, res, next) => {
 
     const api = paystackClient();
     const kobo = Math.round(body.amount * 100);
+
     const r = await api.post("/transaction/initialize", {
       email: `${user.phone}@buybites.local`,
       amount: kobo,
       reference: ref,
-      callback_url: `${process.env.FRONTEND_URL}/callback.html`,
+      callback_url: getCallbackUrl(req),
       metadata: { userId: String(user._id), purpose: "wallet_funding" }
     });
 
-    res.json({ ok: true, reference: ref, authorization_url: r.data.data.authorization_url });
-  } catch (e) { next(e); }
+    res.json({
+      ok: true,
+      reference: ref,
+      authorization_url: r.data.data.authorization_url
+    });
+  } catch (e) {
+    next(e);
+  }
 });
 
 router.get("/tx", auth, async (req, res) => {

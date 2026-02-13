@@ -22,30 +22,35 @@ router.post(
       if (hash !== signature) return res.sendStatus(401);
 
       const event = JSON.parse(req.body.toString("utf8"));
-
       if (event.event !== "charge.success") return res.sendStatus(200);
 
-      const data = event.data;
+      const data = event.data || {};
       const ref = data.reference;
       const userId = data?.metadata?.userId;
+
       if (!ref || !userId) return res.sendStatus(200);
 
-      const tx = await WalletTx.findOne({ reference: ref });
+      // ✅ Only process if tx is still PENDING
+      const tx = await WalletTx.findOneAndUpdate(
+        { reference: ref, status: "PENDING" },
+        {
+          $set: {
+            status: "SUCCESS",
+            meta: { paystackId: data.id, channel: data.channel, paidAt: data.paid_at }
+          }
+        },
+        { new: true }
+      );
+
+      // If tx not found OR already processed => done (idempotent)
       if (!tx) return res.sendStatus(200);
-      if (tx.status === "SUCCESS") return res.sendStatus(200);
 
-      const amountNgn = (data.amount || 0) / 100;
-
-      // idempotent credit: mark tx success first (best effort)
-      tx.status = "SUCCESS";
-      tx.meta = { paystackId: data.id };
-      await tx.save();
-
-      await User.findByIdAndUpdate(userId, { $inc: { walletBalance: amountNgn } });
+      // ✅ credit wallet using tx.amount (trusted internal amount)
+      await User.findByIdAndUpdate(userId, { $inc: { walletBalance: tx.amount } });
 
       return res.sendStatus(200);
     } catch {
-      // Always 200 to prevent Paystack retries storm
+      // Always 200 to prevent Paystack retry storms
       return res.sendStatus(200);
     }
   }
