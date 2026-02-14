@@ -8,6 +8,8 @@ const OtpTokenSchema = new mongoose.Schema(
     expiresAt: { type: Date, required: true, index: true },
     attempts: { type: Number, default: 0 },
     used: { type: Boolean, default: false },
+    purposeEnum: { type: String, enum: ["VERIFY", "RESET_PIN", "RESET_DEVICE"] }
+
   },
   { timestamps: true }
 );

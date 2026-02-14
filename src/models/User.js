@@ -10,6 +10,9 @@ const UserSchema = new mongoose.Schema(
     failedLoginAttempts: { type: Number, default: 0 },
 lockUntil: { type: Date, default: null },
 isVerified: { type: Boolean, default: false },
+deviceId: { type: String, default: null },
+deviceBoundAt: { type: Date, default: null },
+
 
   },
   { timestamps: true }

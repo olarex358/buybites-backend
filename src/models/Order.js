@@ -14,9 +14,8 @@ const OrderSchema = new mongoose.Schema(
     },
     providerRef: { type: String, default: "" },
     retries: { type: Number, default: 0 },
-    lastError: { type: String, default: "" }
+    lastError: { type: String, default: "" },
     orderRef: { type: String, required: true, unique: true }
-
   },
   
   { timestamps: true }

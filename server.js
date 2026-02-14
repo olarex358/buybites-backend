@@ -10,6 +10,7 @@ const { apiLimiter } = require("./src/middleware/rateLimit");
 const { notFound, errorHandler } = require("./src/middleware/error");
 
 const app = express();
+app.set("trust proxy", 1);
 
 // -------------------- Security + logs --------------------
 app.use(helmet());
@@ -45,7 +46,12 @@ const corsOptions = {
   },
   credentials: false,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-admin-key"],
+  allowedHeaders: [
+  "Content-Type",
+  "Authorization",
+  "x-admin-key",
+  "x-device-id"
+],
 };
 
 app.use(cors(corsOptions));
