@@ -16,7 +16,7 @@ function getCallbackUrl(req) {
     req.headers.origin ||
     "http://127.0.0.1:5500";
 
-  return `${base.replace(/\/$/, "")}/callback.html`;
+  return `${base.replace(/\/$/, "")}/callback`;
 }
 
 router.get("/balance", auth, async (req, res) => {
