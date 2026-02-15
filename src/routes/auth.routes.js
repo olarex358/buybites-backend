@@ -10,7 +10,8 @@ const OtpToken = require("../models/OtpToken");
 const { authLimiter } = require("../middleware/rateLimit");
 const { auth } = require("../middleware/auth");
 const { requireDeviceId } = require("../middleware/device");
-const { sendSms } = require("../services/sms.service");
+const { sendWhatsappOtp } = require("../services/sms.service");
+
 
 // ----------------- constants -----------------
 const OTP_TTL_MINUTES = 5;
@@ -265,10 +266,7 @@ router.post("/otp/request", authLimiter, async (req, res, next) => {
         ? "device reset"
         : "verification";
 
-    await sendSms({
-      to: phone,
-      message: `BuyBites ${label} OTP: ${code}. Expires in ${OTP_TTL_MINUTES} minutes.`,
-    });
+    await sendWhatsappOtp({ to: phone, otp: code });
 
     return res.json({ ok: true, message: "OTP sent", cooldown: OTP_COOLDOWN_SECONDS });
   } catch (e) {
@@ -331,10 +329,8 @@ router.post("/pin/forgot/request", authLimiter, async (req, res, next) => {
 
     const code = await createOtp({ phone, purpose: "RESET_PIN", ttlMinutes: OTP_TTL_MINUTES });
 
-    await sendSms({
-      to: phone,
-      message: `BuyBites PIN reset OTP: ${code}. Expires in ${OTP_TTL_MINUTES} minutes.`,
-    });
+   await sendWhatsappOtp({ to: phone, otp: code });
+
 
     return res.json({ ok: true, message: "OTP sent", cooldown: OTP_COOLDOWN_SECONDS });
   } catch (e) {
@@ -378,10 +374,8 @@ router.post("/device/reset/request", authLimiter, async (req, res, next) => {
 
     const code = await createOtp({ phone, purpose: "RESET_DEVICE", ttlMinutes: OTP_TTL_MINUTES });
 
-    await sendSms({
-      to: phone,
-      message: `BuyBites device reset OTP: ${code}. Expires in ${OTP_TTL_MINUTES} minutes.`,
-    });
+   await sendWhatsappOtp({ to: phone, otp: code });
+
 
     return res.json({ ok: true, message: "OTP sent", cooldown: OTP_COOLDOWN_SECONDS });
   } catch (e) {
