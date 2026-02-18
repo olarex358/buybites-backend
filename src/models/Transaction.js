@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-// Unified transaction model (BuyBites 2.0)
+// Unified transaction model (BuyBites 2.0+)
 // Covers DATA, AIRTIME, ELECTRICITY, TV, etc.
 
 const TransactionSchema = new mongoose.Schema(
@@ -15,7 +15,20 @@ const TransactionSchema = new mongoose.Schema(
     },
 
     provider: { type: String, default: "", index: true },
-    amount: { type: Number, required: true },
+
+    // 💰 Pricing fields (Agent/Reseller-ready) ✅
+    tierAtPurchase: {
+      type: String,
+      enum: ["USER", "BASIC", "SILVER", "GOLD", "PLATINUM"],
+      default: "USER",
+      index: true
+    },
+    sellPrice: { type: Number, required: true },   // what we charged the user
+    baseCost: { type: Number, default: 0 },        // your internal cost (optional)
+    profit: { type: Number, default: 0 },          // sellPrice - baseCost
+
+    // Backward compatibility
+    amount: { type: Number, required: true }, // keep using amount as "charged amount"
     fee: { type: Number, default: 0 },
 
     reference: { type: String, required: true, unique: true, index: true },
@@ -32,7 +45,7 @@ const TransactionSchema = new mongoose.Schema(
     retries: { type: Number, default: 0 },
     lastError: { type: String, default: "" },
 
-    // Flexible payload (recipient phone, planCode, meterNo, smartcard, etc.)
+    // Flexible payload
     meta: { type: Object, default: {} },
   },
   { timestamps: true }

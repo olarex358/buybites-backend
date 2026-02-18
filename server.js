@@ -86,6 +86,9 @@ app.use("/api/purchase", require("./src/routes/purchase.routes"));
 app.use("/api/tx", require("./src/routes/transactions.routes"));
 app.use("/api/peyflex", require("./src/routes/peyflex.routes"));
 app.use("/api/admin", require("./src/routes/admin.routes"));
+app.use("/api/airtime", require("./src/routes/airtime.routes"));
+app.use("/api/electricity", require("./src/routes/electricity.routes"));
+
 
 // -------------------- Errors --------------------
 app.use(notFound);

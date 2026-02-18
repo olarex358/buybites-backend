@@ -8,6 +8,10 @@ const DataPlan = require("../models/DataPlan");
 const { genRef } = require("../utils/ref");
 const { cleanPhone, matchesNetwork } = require("../utils/phone");
 const { peyflexClient } = require("./peyflex.service");
+const Pricing = require("../models/Pricing");
+const { createAirtimeTx, processAirtimeTx } = require("../services/tx.airtime");
+const { createElectricityTx, processElectricityTx } = require("../services/tx.electricity");
+
 
 async function atomicDebit(userId, amount) {
   return User.findOneAndUpdate(
@@ -62,7 +66,39 @@ async function createDataTx({ userId, network, mobile_number, plan_code }) {
     throw err;
   }
 
-  const amount = Number(plan.sellPrice);
+    const user = await User.findById(userId).select("role tier");
+  const tier = user?.tier || "USER";
+
+  // Pricing override (manual tier pricing) ✅
+  const pricing = await Pricing.findOne({
+    serviceType: "DATA",
+    network: body.network,
+    productCode: body.plan_code,
+    isActive: true,
+  });
+
+  const sellPrice =
+    Number(pricing?.prices?.[tier]) ||
+    Number(pricing?.prices?.USER) ||
+    Number(plan.sellPrice);
+
+  const baseCost = Number(pricing?.baseCost || plan.costPrice || 0);
+  const profit = Math.max(0, sellPrice - baseCost);
+
+  const amount = sellPrice; // keep existing logic using `amount`
+if (type === "AIRTIME") {
+  const { tx } = await createAirtimeTx({ userId, body: meta, idempotencyKey });
+  // keep your existing debit/refund logic around this call if you already have it
+  const result = await processAirtimeTx(tx);
+  return res.json({ ok: true, tx: result.tx });
+}
+
+if (type === "ELECTRICITY") {
+  const { tx } = await createElectricityTx({ userId, body: meta, idempotencyKey });
+  const result = await processElectricityTx(tx);
+  return res.json({ ok: true, tx: result.tx, token: result.provider?.token || result.provider?.data?.token });
+}
+
 
   // Dedup (90s) — same as old Order logic
   const recent = await Transaction.findOne({
@@ -80,13 +116,19 @@ async function createDataTx({ userId, network, mobile_number, plan_code }) {
 
   const reference = genRef("TX");
 
-  const tx = await Transaction.create({
+    const tx = await Transaction.create({
     userId,
     type: "DATA",
     provider: "PEYFLEX",
-    amount,
+
+    tierAtPurchase: tier,
+    sellPrice,
+    baseCost,
+    profit,
+
+    amount, // charged amount (same as sellPrice)
     reference,
-    status: "PROCESSING",
+  status: "PROCESSING",
     retries: 0,
     meta: {
       network: body.network,
@@ -153,11 +195,18 @@ async function createDataTx({ userId, network, mobile_number, plan_code }) {
   const txt = JSON.stringify(responseData || "").toLowerCase();
   const isSuccess = responseData && (txt.includes("success") || txt.includes("delivered"));
 
-  if (isSuccess) {
+    if (isSuccess) {
     tx.status = "SUCCESS";
     await tx.save();
+
+    // Update agent/user totals ✅ (SUCCESS only)
+    await User.findByIdAndUpdate(userId, {
+      $inc: { totalVolume: sellPrice, totalProfit: profit },
+    });
+
     return { tx, networkMatch, provider: responseData };
   }
+
 
   // Refund idempotently
   tx.status = "REFUNDED";

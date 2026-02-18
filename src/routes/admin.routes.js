@@ -5,6 +5,8 @@ const User = require("../models/User");
 const WalletTx = require("../models/WalletTx");
 const Order = require("../models/Order");
 const DataPlan = require("../models/DataPlan");
+const Pricing = require("../models/Pricing");
+
 
 router.use(adminOnly);
 
@@ -207,5 +209,76 @@ router.get("/export/wallet.csv", async (req, res, next) => {
     next(e);
   }
 });
+
+// ✅ 8) PRICING (manual tier pricing)
+router.get("/pricing", async (req, res, next) => {
+  try {
+    const serviceType = String(req.query.serviceType || "").trim();
+    const network = String(req.query.network || "").trim();
+    const productCode = String(req.query.productCode || "").trim();
+
+    const filter = {};
+    if (serviceType) filter.serviceType = serviceType;
+    if (network) filter.network = network;
+    if (productCode) filter.productCode = productCode;
+
+    const items = await Pricing.find(filter).sort({ serviceType: 1, network: 1, productCode: 1 });
+    res.json({ ok: true, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.put("/pricing", async (req, res, next) => {
+  try {
+    const b = z.object({
+      serviceType: z.enum(["DATA", "AIRTIME", "ELECTRICITY", "TV", "PIN", "BETTING"]),
+      network: z.string().optional().default(""),
+      productCode: z.string().optional().default(""),
+      prices: z.object({
+        USER: z.number().optional(),
+        BASIC: z.number().optional(),
+        SILVER: z.number().optional(),
+        GOLD: z.number().optional(),
+        PLATINUM: z.number().optional(),
+      }).default({}),
+      baseCost: z.number().optional(),
+      isActive: z.boolean().optional(),
+    }).parse(req.body);
+
+    const doc = await Pricing.findOneAndUpdate(
+      { serviceType: b.serviceType, network: b.network, productCode: b.productCode },
+      {
+        serviceType: b.serviceType,
+        network: b.network,
+        productCode: b.productCode,
+        prices: {
+          USER: b.prices.USER ?? 0,
+          BASIC: b.prices.BASIC ?? 0,
+          SILVER: b.prices.SILVER ?? 0,
+          GOLD: b.prices.GOLD ?? 0,
+          PLATINUM: b.prices.PLATINUM ?? 0,
+        },
+        baseCost: b.baseCost ?? 0,
+        isActive: b.isActive ?? true,
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({ ok: true, item: doc });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.delete("/pricing/:id", async (req, res, next) => {
+  try {
+    await Pricing.findByIdAndDelete(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
 
 module.exports = router;
