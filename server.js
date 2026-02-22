@@ -9,6 +9,7 @@ const { connectDB } = require("./src/config/db");
 const { apiLimiter } = require("./src/middleware/rateLimit");
 const { notFound, errorHandler } = require("./src/middleware/error");
 const { seedAdmin } = require("./src/utils/seedAdmin");
+
 const app = express();
 app.set("trust proxy", 1);
 
@@ -21,7 +22,7 @@ app.use(morgan("dev"));
 // You can add more allowed origins by separating with commas in FRONTEND_URLS
 const envUrls = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 const allowList = [
@@ -34,7 +35,9 @@ const allowList = [
   // Optional if you run frontend on 3000
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-   "http://localhost:5173",
+
+  // Vite
+  "http://localhost:5173",
   "http://127.0.0.1:5173",
 ];
 
@@ -48,16 +51,10 @@ const corsOptions = {
   },
   credentials: false,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-  "Content-Type",
-  "Authorization",
-  "x-admin-key",
-  "x-device-id"
-],
+  allowedHeaders: ["Content-Type", "Authorization", "x-admin-key", "x-device-id"],
 };
 
 app.use(cors(corsOptions));
-// ✅ handle preflight
 app.options("*", cors(corsOptions));
 
 // -------------------- Paystack webhook (RAW first) --------------------
@@ -89,19 +86,29 @@ app.use("/api/admin", require("./src/routes/admin.routes"));
 app.use("/api/airtime", require("./src/routes/airtime.routes"));
 app.use("/api/electricity", require("./src/routes/electricity.routes"));
 
-
 // -------------------- Errors --------------------
 app.use(notFound);
 app.use(errorHandler);
 
 // -------------------- Start --------------------
 const PORT = process.env.PORT || 5000;
-await seedAdmin();
-connectDB()
-  .then(() => {
-    app.listen(PORT, () => console.log(`🚀 BuyBites API running on port ${PORT}`));
-  })
-  .catch((e) => {
-    console.error("❌ DB connection failed:", e.message);
+
+async function start() {
+  try {
+    // 1) connect DB first
+    await connectDB();
+
+    // 2) seed admin after DB is ready (uses env vars; harmless if not provided)
+    await seedAdmin();
+
+    // 3) start server
+    app.listen(PORT, () => {
+      console.log(`🚀 BuyBites API running on port ${PORT}`);
+    });
+  } catch (e) {
+    console.error("❌ Startup failed:", e.message || e);
     process.exit(1);
-  });
+  }
+}
+
+start();
