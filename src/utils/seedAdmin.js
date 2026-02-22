@@ -1,29 +1,34 @@
-const User = require("../models/User");
-const { cleanPhone } = require("./phone"); // you already have phone utils
+const bcrypt = require("bcryptjs");
+const User = require("../models/user.model");
 
 async function seedAdmin() {
-  const phoneRaw = process.env.SEED_ADMIN_PHONE;
+  const phone = process.env.SEED_ADMIN_PHONE;
   const pin = process.env.SEED_ADMIN_PIN;
   const name = process.env.SEED_ADMIN_NAME || "Admin";
 
-  if (!phoneRaw || !pin) return;
+  // If no env values provided, skip silently
+  if (!phone || !pin) {
+    console.log("⚠️ Admin seed skipped (no env provided)");
+    return;
+  }
 
-  const phone = cleanPhone(phoneRaw) || phoneRaw;
-  const exists = await User.findOne({ role: "ADMIN" }).select("_id");
-  if (exists) return;
+  const existing = await User.findOne({ phone });
+  if (existing) {
+    console.log("✅ Admin already exists");
+    return;
+  }
 
-  // If your User model hashes pin in pre-save, this is safe.
-  // If you hash pin manually elsewhere, paste User.js and I’ll align it.
+  const pinHash = await bcrypt.hash(pin, 10);
+
   await User.create({
     phone,
-    pin,
-    name,
+    fullName: name,
+    pinHash,
     role: "ADMIN",
     tier: "PLATINUM",
-    isActive: true,
   });
 
-  console.log("✅ Seed admin created:", phone);
+  console.log("🔥 Admin seeded successfully");
 }
 
 module.exports = { seedAdmin };
