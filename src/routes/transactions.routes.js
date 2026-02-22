@@ -3,33 +3,61 @@ const { z } = require("zod");
 
 const { auth } = require("../middleware/auth");
 const Transaction = require("../models/Transaction");
-const { createDataTx } = require("../services/tx.engine");
+
+// ✅ use the unified engine
+const { createUnifiedTx } = require("../services/tx.engine");
 
 // Create unified transaction
 router.post("/create", auth, async (req, res, next) => {
   try {
+    // ✅ Accept BOTH (new + old) formats
     const b = z
       .object({
-        type: z.enum(["DATA", "AIRTIME", "ELECTRICITY", "TV", "SAVINGS", "CARD", "OTHER"]),
+        // new format
+        serviceType: z.string().optional(),
+        network: z.string().optional(),
+        productCode: z.string().optional(),
+        meta: z.any().optional(),
+
+        // old format (backward compatible)
+        type: z.string().optional(),
         amount: z.number().optional(),
-        meta: z.object({}).passthrough().default({}),
       })
+      .passthrough()
       .parse(req.body);
 
-    // For v1/v2 compatibility we currently implement DATA through Peyflex.
-    if (b.type === "DATA") {
-      const { network, mobile_number, plan_code } = b.meta;
-      const out = await createDataTx({
-        userId: req.user.sub,
-        network,
-        mobile_number,
-        plan_code,
-      });
+    // Normalize to new format
+    const serviceType = (b.serviceType || b.type || "").toUpperCase();
 
-      return res.json({ ok: true, tx: out.tx, networkMatch: out.networkMatch, deduped: !!out.deduped });
+    // DATA old meta supports: { network, mobile_number, plan_code }
+    // New format uses: { network, productCode, meta.mobile_number }
+    const normalized = {
+      serviceType,
+      network: b.network || b.meta?.network,
+      productCode: b.productCode || b.meta?.plan_code || b.meta?.productCode,
+      meta: b.meta || {},
+    };
+
+    // Ensure DATA has a recipient number if old payload used mobile_number
+    if (serviceType === "DATA") {
+      normalized.meta.mobile_number =
+        normalized.meta.mobile_number || normalized.meta.phone || normalized.meta.recipient || b.meta?.mobile_number;
     }
 
-    return res.status(501).json({ ok: false, error: "Service not enabled yet" });
+    const out = await createUnifiedTx({
+      userId: req.user.sub,
+      body: normalized,
+      headers: req.headers,
+    });
+
+    return res.json({
+      ok: true,
+      tx: out.tx,
+      provider: out.provider,
+      token: out.token,
+      networkMatch: out.networkMatch,
+      deduped: !!out.deduped,
+    });
   } catch (e) {
     next(e);
   }
@@ -37,7 +65,10 @@ router.post("/create", auth, async (req, res, next) => {
 
 // List my transactions
 router.get("/my", auth, async (req, res) => {
-  const txs = await Transaction.find({ userId: req.user.sub }).sort({ createdAt: -1 }).limit(50);
+  const txs = await Transaction.find({ userId: req.user.sub })
+    .sort({ createdAt: -1 })
+    .limit(50);
+
   res.json({ ok: true, txs });
 });
 

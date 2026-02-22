@@ -93,7 +93,13 @@ function sign(user) {
     throw err;
   }
   return jwt.sign(
-    { sub: String(user._id), phone: user.phone },
+    {
+      sub: String(user._id),
+      phone: user.phone,
+      role: user.role,
+      tier: user.tier,
+      name: user.fullName || "",
+    },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES || "7d" }
   );
@@ -194,7 +200,7 @@ router.post("/register", authLimiter, requireDeviceId, async (req, res, next) =>
     });
 
     const token = sign(user);
-    return res.json({ ok: true, token, user: { id: user._id, phone: user.phone, isVerified: user.isVerified } });
+    return res.json({ ok: true, token, user: { id: user._id, phone: user.phone, fullName: user.fullName, role: user.role, tier: user.tier, isVerified: user.isVerified } });
   } catch (e) {
     next(e);
   }
@@ -242,7 +248,7 @@ router.post("/login", authLimiter, requireDeviceId, async (req, res, next) => {
     await user.save();
 
     const token = sign(user);
-    return res.json({ ok: true, token, user: { id: user._id, phone: user.phone, isVerified: user.isVerified } });
+    return res.json({ ok: true, token, user: { id: user._id, phone: user.phone, fullName: user.fullName, role: user.role, tier: user.tier, isVerified: user.isVerified } });
   } catch (e) {
     next(e);
   }

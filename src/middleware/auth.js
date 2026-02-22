@@ -7,7 +7,7 @@ function auth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = payload;
+    req.user = payload; // should contain: sub, role, tier
     next();
   } catch {
     return res.status(401).json({ ok: false, error: "Invalid token" });

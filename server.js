@@ -8,7 +8,7 @@ const mongoSanitize = require("express-mongo-sanitize");
 const { connectDB } = require("./src/config/db");
 const { apiLimiter } = require("./src/middleware/rateLimit");
 const { notFound, errorHandler } = require("./src/middleware/error");
-
+const { seedAdmin } = require("./src/utils/seedAdmin");
 const app = express();
 app.set("trust proxy", 1);
 
@@ -96,7 +96,7 @@ app.use(errorHandler);
 
 // -------------------- Start --------------------
 const PORT = process.env.PORT || 5000;
-
+await seedAdmin();
 connectDB()
   .then(() => {
     app.listen(PORT, () => console.log(`🚀 BuyBites API running on port ${PORT}`));

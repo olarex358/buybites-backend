@@ -5,30 +5,34 @@ const { verifyElectricity, buyElectricity } = require("./providers/peyflex.provi
 const { newReference } = require("./tx.utils");
 
 async function verifyMeter({ disco, meterNumber, meterType }) {
-  if (!disco || !meterNumber || !meterType) throw new Error("Invalid meter verify payload");
+  if (!disco || !meterNumber || !meterType) {
+    const err = new Error("Invalid meter verify payload");
+    err.status = 400;
+    throw err;
+  }
   return verifyElectricity({ disco, meterNumber, meterType });
 }
 
 async function createElectricityTx({ userId, body, idempotencyKey }) {
-  // body: { disco, meterNumber, meterType, amount, phone }
   const user = await User.findById(userId).select("tier");
   const tier = user?.tier || "USER";
 
-  const disco = String(body.disco || "").toUpperCase().trim();
+  const disco = String(body.disco || body.network || "").toUpperCase().trim();
   const meterNumber = String(body.meterNumber || "").trim();
   const meterType = String(body.meterType || "").toUpperCase().trim(); // PREPAID/POSTPAID
   const phone = String(body.phone || "").trim();
   const amountInput = Number(body.amount || 0);
 
   if (!disco || !meterNumber || !meterType || !amountInput || amountInput < 100) {
-    throw new Error("Invalid electricity payload");
+    const err = new Error("Invalid electricity payload");
+    err.status = 400;
+    throw err;
   }
 
-  // manual pricing lookup ✅ (productCode can be disco+meterType if you like)
   const pricing = await Pricing.findOne({
     serviceType: "ELECTRICITY",
-    network: disco,
-    productCode: meterType,
+    network: disco,         // using disco as "network"
+    productCode: meterType, // PREPAID/POSTPAID
     isActive: true,
   });
 
@@ -60,6 +64,10 @@ async function createElectricityTx({ userId, body, idempotencyKey }) {
   return { tx };
 }
 
+/**
+ * ✅ Only calls provider and returns result.
+ * Wallet debit/refund + final status are handled by tx.engine.js
+ */
 async function processElectricityTx(tx) {
   const payload = {
     disco: tx.meta.disco,
@@ -71,25 +79,15 @@ async function processElectricityTx(tx) {
   };
 
   const providerRes = await buyElectricity(payload);
-  const isSuccess = providerRes?.status === "success" || providerRes?.success === true;
 
-  if (isSuccess) {
-    tx.status = "SUCCESS";
-    tx.providerRef = providerRes?.token || providerRes?.data?.token || "";
-    await tx.save();
+  const ok =
+    providerRes?.status === "success" ||
+    providerRes?.success === true ||
+    String(providerRes?.message || "").toLowerCase().includes("success");
 
-    await User.findByIdAndUpdate(tx.userId, {
-      $inc: { totalVolume: tx.sellPrice, totalProfit: tx.profit },
-    });
+  const token = providerRes?.token || providerRes?.data?.token || "";
 
-    return { ok: true, tx, provider: providerRes };
-  }
-
-  tx.status = "FAILED";
-  tx.lastError = providerRes?.message || "Electricity failed";
-  await tx.save();
-
-  return { ok: false, tx, provider: providerRes };
+  return { ok, provider: providerRes, token };
 }
 
 module.exports = { verifyMeter, createElectricityTx, processElectricityTx };

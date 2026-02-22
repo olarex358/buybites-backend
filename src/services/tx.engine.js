@@ -4,15 +4,16 @@ const User = require("../models/User");
 const WalletTx = require("../models/WalletTx");
 const Transaction = require("../models/Transaction");
 const DataPlan = require("../models/DataPlan");
+const Pricing = require("../models/Pricing");
 
 const { genRef } = require("../utils/ref");
 const { cleanPhone, matchesNetwork } = require("../utils/phone");
 const { peyflexClient } = require("./peyflex.service");
-const Pricing = require("../models/Pricing");
-const { createAirtimeTx, processAirtimeTx } = require("../services/tx.airtime");
-const { createElectricityTx, processElectricityTx } = require("../services/tx.electricity");
 
+const { createAirtimeTx, processAirtimeTx } = require("./tx.airtime");
+const { createElectricityTx, processElectricityTx } = require("./tx.electricity");
 
+// ---------- wallet atomic ops ----------
 async function atomicDebit(userId, amount) {
   return User.findOneAndUpdate(
     { _id: userId, walletBalance: { $gte: amount } },
@@ -30,11 +31,156 @@ async function sleep(ms) {
 }
 
 /**
- * Create a unified DATA transaction (BuyBites 2.0)
- * - Dedup within 90 seconds
- * - Atomic wallet debit
- * - Provider retry
- * - Idempotent refund
+ * ✅ Unified entry point for ALL services
+ * body: { serviceType, network, productCode, meta }
+ */
+async function createUnifiedTx({ userId, body, headers = {} }) {
+  const payload = z
+    .object({
+      serviceType: z.string().min(2),
+      network: z.string().optional(),
+      productCode: z.string().optional(),
+      meta: z.any().optional(),
+    })
+    .parse(body);
+
+  const serviceType = String(payload.serviceType).toUpperCase();
+  const network = payload.network;
+  const productCode = payload.productCode;
+  const meta = payload.meta || {};
+
+  // Optional idempotency key (nice for retries)
+  const idempotencyKey =
+    headers["x-idempotency-key"] ||
+    headers["X-Idempotency-Key"] ||
+    `IDEMP_${genRef("K")}`;
+
+  if (serviceType === "DATA") {
+    // DATA expects: network + plan_code + mobile_number
+    return createDataTx({
+      userId,
+      network,
+      mobile_number: meta.mobile_number || meta.phone || meta.recipient,
+      plan_code: productCode || meta.plan_code,
+      idempotencyKey,
+    });
+  }
+
+  // helper: create debit ledger
+async function ledgerDebit({ userId, tx, amount }) {
+  const debitRef = `DEB_${tx.reference}`;
+  await WalletTx.create({
+    userId,
+    type: "DEBIT",
+    amount,
+    reference: debitRef,
+    status: "SUCCESS",
+    meta: { txId: String(tx._id), reference: tx.reference, type: tx.type, ...tx.meta },
+  });
+}
+
+// helper: refund idempotently
+async function refundIfNeeded({ userId, tx, amount, reason }) {
+  const refundRef = `CR_${tx.reference}`;
+  const alreadyRefunded = await WalletTx.findOne({ reference: refundRef }).select("_id");
+  if (!alreadyRefunded) {
+    await atomicCredit(userId, amount);
+    await WalletTx.create({
+      userId,
+      type: "CREDIT",
+      amount,
+      reference: refundRef,
+      status: "SUCCESS",
+      meta: { txId: String(tx._id), reference: tx.reference, reason },
+    });
+  }
+}
+
+if (serviceType === "AIRTIME") {
+  const { tx } = await createAirtimeTx({
+    userId,
+    body: { network, ...meta },
+    idempotencyKey,
+  });
+
+  // ✅ debit wallet
+  const debited = await atomicDebit(userId, tx.amount);
+  if (!debited) {
+    tx.status = "FAILED";
+    tx.lastError = "Insufficient balance";
+    await tx.save();
+    const err = new Error("Insufficient balance");
+    err.status = 400;
+    throw err;
+  }
+  await ledgerDebit({ userId, tx, amount: tx.amount });
+
+  const result = await processAirtimeTx(tx);
+
+  if (result.ok) {
+    tx.status = "SUCCESS";
+    tx.providerRef = result.provider?.reference || result.provider?.data?.ref || "";
+    await tx.save();
+    await User.findByIdAndUpdate(userId, { $inc: { totalVolume: tx.sellPrice, totalProfit: tx.profit } });
+    return { tx, provider: result.provider };
+  }
+
+  // ✅ refund
+  tx.status = "REFUNDED";
+  tx.lastError = result.provider?.message || "Airtime failed";
+  await tx.save();
+  await refundIfNeeded({ userId, tx, amount: tx.amount, reason: tx.lastError });
+
+  return { tx, provider: result.provider };
+}
+
+if (serviceType === "ELECTRICITY") {
+  const { tx } = await createElectricityTx({
+    userId,
+    body: { ...meta, network }, // meta contains disco/meterType/meterNumber etc
+    idempotencyKey,
+  });
+
+  const debited = await atomicDebit(userId, tx.amount);
+  if (!debited) {
+    tx.status = "FAILED";
+    tx.lastError = "Insufficient balance";
+    await tx.save();
+    const err = new Error("Insufficient balance");
+    err.status = 400;
+    throw err;
+  }
+  await ledgerDebit({ userId, tx, amount: tx.amount });
+
+  const result = await processElectricityTx(tx);
+
+  if (result.ok) {
+    tx.status = "SUCCESS";
+    tx.providerRef = result.token || "";
+    await tx.save();
+    await User.findByIdAndUpdate(userId, { $inc: { totalVolume: tx.sellPrice, totalProfit: tx.profit } });
+    return { tx, provider: result.provider, token: result.token };
+  }
+
+  tx.status = "REFUNDED";
+  tx.lastError = result.provider?.message || "Electricity failed";
+  await tx.save();
+  await refundIfNeeded({ userId, tx, amount: tx.amount, reason: tx.lastError });
+
+  return { tx, provider: result.provider };
+}
+const err = new Error(`Unsupported serviceType: ${serviceType}`);
+  err.status = 400;
+  throw err;
+}
+
+/**
+ * ✅ Your existing DATA flow (clean + stable)
+ * - dedup within 90s
+ * - tier pricing override
+ * - atomic debit + ledger
+ * - provider retry
+ * - idempotent refund
  */
 async function createDataTx({ userId, network, mobile_number, plan_code }) {
   const body = z
@@ -66,10 +212,10 @@ async function createDataTx({ userId, network, mobile_number, plan_code }) {
     throw err;
   }
 
-    const user = await User.findById(userId).select("role tier");
+  const user = await User.findById(userId).select("role tier");
   const tier = user?.tier || "USER";
 
-  // Pricing override (manual tier pricing) ✅
+  // Tier pricing override ✅
   const pricing = await Pricing.findOne({
     serviceType: "DATA",
     network: body.network,
@@ -84,23 +230,9 @@ async function createDataTx({ userId, network, mobile_number, plan_code }) {
 
   const baseCost = Number(pricing?.baseCost || plan.costPrice || 0);
   const profit = Math.max(0, sellPrice - baseCost);
+  const amount = sellPrice;
 
-  const amount = sellPrice; // keep existing logic using `amount`
-if (type === "AIRTIME") {
-  const { tx } = await createAirtimeTx({ userId, body: meta, idempotencyKey });
-  // keep your existing debit/refund logic around this call if you already have it
-  const result = await processAirtimeTx(tx);
-  return res.json({ ok: true, tx: result.tx });
-}
-
-if (type === "ELECTRICITY") {
-  const { tx } = await createElectricityTx({ userId, body: meta, idempotencyKey });
-  const result = await processElectricityTx(tx);
-  return res.json({ ok: true, tx: result.tx, token: result.provider?.token || result.provider?.data?.token });
-}
-
-
-  // Dedup (90s) — same as old Order logic
+  // Dedup (90s)
   const recent = await Transaction.findOne({
     userId,
     type: "DATA",
@@ -116,7 +248,7 @@ if (type === "ELECTRICITY") {
 
   const reference = genRef("TX");
 
-    const tx = await Transaction.create({
+  const tx = await Transaction.create({
     userId,
     type: "DATA",
     provider: "PEYFLEX",
@@ -126,9 +258,9 @@ if (type === "ELECTRICITY") {
     baseCost,
     profit,
 
-    amount, // charged amount (same as sellPrice)
+    amount,
     reference,
-  status: "PROCESSING",
+    status: "PROCESSING",
     retries: 0,
     meta: {
       network: body.network,
@@ -156,7 +288,7 @@ if (type === "ELECTRICITY") {
     throw err;
   }
 
-  // Wallet debit ledger (unique ref)
+  // Ledger debit
   const debitRef = `DEB_${reference}`;
   await WalletTx.create({
     userId,
@@ -182,6 +314,7 @@ if (type === "ELECTRICITY") {
         mobile_number: phone11,
         plan_code: body.plan_code,
       });
+
       responseData = r.data;
       break;
     } catch (e) {
@@ -195,18 +328,16 @@ if (type === "ELECTRICITY") {
   const txt = JSON.stringify(responseData || "").toLowerCase();
   const isSuccess = responseData && (txt.includes("success") || txt.includes("delivered"));
 
-    if (isSuccess) {
+  if (isSuccess) {
     tx.status = "SUCCESS";
     await tx.save();
 
-    // Update agent/user totals ✅ (SUCCESS only)
     await User.findByIdAndUpdate(userId, {
       $inc: { totalVolume: sellPrice, totalProfit: profit },
     });
 
     return { tx, networkMatch, provider: responseData };
   }
-
 
   // Refund idempotently
   tx.status = "REFUNDED";
@@ -230,4 +361,4 @@ if (type === "ELECTRICITY") {
   return { tx, networkMatch, provider: responseData };
 }
 
-module.exports = { createDataTx };
+module.exports = { createUnifiedTx, createDataTx };

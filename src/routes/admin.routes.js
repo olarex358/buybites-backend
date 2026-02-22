@@ -6,8 +6,13 @@ const WalletTx = require("../models/WalletTx");
 const Order = require("../models/Order");
 const DataPlan = require("../models/DataPlan");
 const Pricing = require("../models/Pricing");
+const { z } = require("zod");
+const { auth } = require("../middleware/auth"); // you already have this
+const { cleanPhone } = require("../utils/phone");
+const bcrypt = require("bcryptjs");
 
 
+router.use(auth);
 router.use(adminOnly);
 
 // ---------- helpers ----------
@@ -71,7 +76,7 @@ router.get("/users", async (req, res, next) => {
     const [total, users] = await Promise.all([
       User.countDocuments(filter),
       User.find(filter)
-        .select("phone fullName walletBalance isBlocked createdAt")
+        .select("phone fullName walletBalance isBlocked role tier totalVolume totalProfit createdAt")
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit),
@@ -281,4 +286,56 @@ router.delete("/pricing/:id", async (req, res, next) => {
 });
 
 
+// ✅ Create Agent directly
+router.post("/agents", async (req, res, next) => {
+  try {
+  const b = z.object({
+    phone: z.string().min(8),
+    pin: z.string().min(4).max(8),
+    name: z.string().optional(),
+    tier: z.enum(["USER","BASIC","SILVER","GOLD","PLATINUM"]).optional(),
+  }).parse(req.body);
+
+  const phone = cleanPhone(b.phone) || b.phone;
+
+  const exists = await User.findOne({ phone }).select("_id");
+  if (exists) return res.status(409).json({ ok: false, error: "User already exists" });
+
+  const pinHash = await bcrypt.hash(String(b.pin), 12);
+
+  const agent = await User.create({
+    phone,
+    pinHash,
+    fullName: b.name || "",
+    role: "AGENT",
+    tier: b.tier || "BASIC",
+  });
+
+  res.json({ ok: true, agent: { id: agent._id, phone: agent.phone, role: agent.role, tier: agent.tier, fullName: agent.fullName } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ✅ Promote existing user to Agent/Admin
+router.patch("/users/:id/role", async (req, res, next) => {
+  try {
+  const b = z.object({
+    role: z.enum(["USER","AGENT","ADMIN"]),
+    tier: z.enum(["USER","BASIC","SILVER","GOLD","PLATINUM"]).optional(),
+  }).parse(req.body);
+
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { role: b.role, ...(b.tier ? { tier: b.tier } : {}) },
+    { new: true }
+  ).select("phone fullName role tier");
+
+  if (!updated) return res.status(404).json({ ok: false, error: "User not found" });
+
+  res.json({ ok: true, user: updated });
+  } catch (e) {
+    next(e);
+  }
+});
 module.exports = router;
