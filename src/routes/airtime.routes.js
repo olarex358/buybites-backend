@@ -1,19 +1,37 @@
 const express = require("express");
 const router = express.Router();
-const { protect } = require("../middleware/auth");
-const { api } = require("../controllers/tx.controller"); // if you have a tx controller helper
 
-router.get("/providers", protect, (req, res) => {
+const { auth } = require("../middleware/auth");
+const { createUnifiedTx } = require("../services/tx.engine");
+
+router.get("/providers", auth, (req, res) => {
   res.json({ ok: true, providers: ["MTN", "GLO", "AIRTEL", "9MOBILE"] });
 });
 
-router.post("/buy", protect, async (req, res, next) => {
+router.post("/buy", auth, async (req, res, next) => {
   try {
-    req.body = {
-      type: "AIRTIME",
-      meta: req.body, // { network, mobile_number, amount }
+    const body = {
+      serviceType: "AIRTIME",
+      network: req.body.network,
+      meta: {
+        ...req.body,
+        // support common field names
+        mobile_number: req.body.mobile_number || req.body.phone || req.body.recipient,
+      },
     };
-    return api.createTx(req, res, next); // reuse your tx/create logic
+
+    const out = await createUnifiedTx({
+      userId: req.user.sub,
+      body,
+      headers: req.headers,
+    });
+
+    return res.json({
+      ok: true,
+      tx: out.tx,
+      provider: out.provider,
+      deduped: !!out.deduped,
+    });
   } catch (e) {
     next(e);
   }

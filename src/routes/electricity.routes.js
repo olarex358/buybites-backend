@@ -1,14 +1,18 @@
 const express = require("express");
 const router = express.Router();
-const { protect } = require("../middleware/auth");
-const { verifyMeter } = require("../services/tx.electricity");
-const txController = require("../controllers/tx.controller");
 
-router.get("/discos", protect, (req, res) => {
-  res.json({ ok: true, discos: ["IKEDC", "EKEDC", "AEDC", "IBEDC", "PHED", "KEDCO", "JED", "KAEDCO"] });
+const { auth } = require("../middleware/auth");
+const { verifyMeter } = require("../services/tx.electricity");
+const { createUnifiedTx } = require("../services/tx.engine");
+
+router.get("/discos", auth, (req, res) => {
+  res.json({
+    ok: true,
+    discos: ["IKEDC", "EKEDC", "AEDC", "IBEDC", "PHED", "KEDCO", "JED", "KAEDCO"],
+  });
 });
 
-router.post("/verify", protect, async (req, res, next) => {
+router.post("/verify", auth, async (req, res, next) => {
   try {
     const r = await verifyMeter(req.body);
     res.json({ ok: true, data: r });
@@ -17,13 +21,32 @@ router.post("/verify", protect, async (req, res, next) => {
   }
 });
 
-router.post("/buy", protect, async (req, res, next) => {
+router.post("/buy", auth, async (req, res, next) => {
   try {
-    req.body = {
-      type: "ELECTRICITY",
-      meta: req.body, // { disco, meterNumber, meterType, amount, phone }
+    const body = {
+      serviceType: "ELECTRICITY",
+      meta: {
+        ...req.body,
+        // normalize common fields
+        meterNumber: req.body.meterNumber || req.body.meter_number,
+        meterType: req.body.meterType || req.body.meter_type,
+        phone: req.body.phone || req.body.mobile_number,
+      },
     };
-    return txController.createTx(req, res, next);
+
+    const out = await createUnifiedTx({
+      userId: req.user.sub,
+      body,
+      headers: req.headers,
+    });
+
+    return res.json({
+      ok: true,
+      tx: out.tx,
+      provider: out.provider,
+      token: out.token || "",
+      deduped: !!out.deduped,
+    });
   } catch (e) {
     next(e);
   }
