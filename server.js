@@ -8,6 +8,7 @@ const mongoSanitize = require("express-mongo-sanitize");
 const { connectDB } = require("./src/config/db");
 const { apiLimiter } = require("./src/middleware/rateLimit");
 const { notFound, errorHandler } = require("./src/middleware/error");
+const responseMiddleware = require("./src/middleware/response");
 const { seedAdmin } = require("./src/utils/seedAdmin");
 
 const app = express();
@@ -68,6 +69,7 @@ app.use(
 // -------------------- JSON parser for all other routes --------------------
 app.use(express.json({ limit: "300kb" }));
 app.use(mongoSanitize());
+app.use(responseMiddleware);
 
 // -------------------- Rate limit (after webhook, before api) --------------------
 app.use("/api", apiLimiter);

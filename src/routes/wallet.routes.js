@@ -21,14 +21,14 @@ function getCallbackUrl(req) {
 
 router.get("/balance", auth, async (req, res) => {
   const user = await User.findById(req.user.sub).select("walletBalance");
-  res.json({ ok: true, walletBalance: user?.walletBalance ?? 0 });
+  return res.success({ walletBalance: user?.walletBalance ?? 0 }, "Balance fetched");
 });
 
 router.post("/fund/init", auth, async (req, res, next) => {
   try {
     const body = z.object({ amount: z.number().min(50).max(200000) }).parse(req.body);
     const user = await User.findById(req.user.sub);
-    if (!user) return res.status(404).json({ ok: false, error: "User not found" });
+    if (!user) return res.fail("User not found", 404);
 
     // create unique reference (retry-safe)
     let ref = genRef("FUND");
@@ -60,11 +60,10 @@ router.post("/fund/init", auth, async (req, res, next) => {
       metadata: { userId: String(user._id), purpose: "wallet_funding" }
     });
 
-    res.json({
-      ok: true,
-      reference: ref,
-      authorization_url: r.data.data.authorization_url
-    });
+    return res.success(
+      { reference: ref, authorization_url: r.data.data.authorization_url },
+      "Funding initialized"
+    );
   } catch (e) {
     next(e);
   }
@@ -72,7 +71,7 @@ router.post("/fund/init", auth, async (req, res, next) => {
 
 router.get("/tx", auth, async (req, res) => {
   const tx = await WalletTx.find({ userId: req.user.sub }).sort({ createdAt: -1 }).limit(50);
-  res.json({ ok: true, tx });
+  return res.success({ tx }, "Wallet transactions fetched");
 });
 
 module.exports = router;

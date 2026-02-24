@@ -1,6 +1,6 @@
-const Pricing = require("../models/Pricing");
 const Transaction = require("../models/Transaction");
 const User = require("../models/User");
+const { priceForTier } = require("../utils/pricing.engine");
 const { buyAirtime } = require("./providers/peyflex.provider");
 const { newReference } = require("./tx.utils");
 
@@ -19,22 +19,14 @@ async function createAirtimeTx({ userId, body, idempotencyKey }) {
     throw err;
   }
 
-  // ✅ pricing rule (if you want percentage markup later, we can extend this)
-  const pricing = await Pricing.findOne({
+  const p = await priceForTier({
     serviceType: "AIRTIME",
+    tier,
     network,
-    productCode: "", // airtime has no plan_code
-    isActive: true,
+    productCode: "",
+    defaultSellPrice: amountInput,
+    defaultBaseCost: 0,
   });
-
-  // Sell price = what you charge user (wallet debit)
-  const sellPrice =
-    Number(pricing?.prices?.[tier]) ||
-    Number(pricing?.prices?.USER) ||
-    amountInput;
-
-  const baseCost = Number(pricing?.baseCost || 0);
-  const profit = Math.max(0, sellPrice - baseCost);
 
   const reference = newReference("AT");
 
@@ -43,10 +35,10 @@ async function createAirtimeTx({ userId, body, idempotencyKey }) {
     type: "AIRTIME",
     provider: "PEYFLEX",
     tierAtPurchase: tier,
-    sellPrice,
-    baseCost,
-    profit,
-    amount: sellPrice, // charged amount
+    sellPrice: p.sellPrice,
+    baseCost: p.baseCost,
+    profit: p.profit,
+    amount: p.sellPrice, // charged amount
     reference,
     idempotencyKey: idempotencyKey || "",
     status: "PROCESSING",

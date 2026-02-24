@@ -59,13 +59,10 @@ router.post("/create", auth, async (req, res, next) => {
       headers: req.headers,
     });
 
-    return res.json({
-      ok: true,
-      tx: out.tx,
-      provider: out.provider,
-      token: out.token || "",
-      deduped: !!out.deduped,
-    });
+    return res.success(
+      { tx: out.tx, provider: out.provider, token: out.token || "", deduped: !!out.deduped },
+      "Transaction created"
+    );
   } catch (e) {
     next(e);
   }
@@ -108,14 +105,11 @@ router.get("/", auth, async (req, res, next) => {
       Transaction.countDocuments(filter),
     ]);
 
-    res.json({
-      ok: true,
-      page,
-      limit,
-      total,
-      pages: Math.ceil(total / limit),
-      items,
-    });
+    return res.success(
+      { items },
+      "Transactions fetched",
+      { page, limit, total, pages: Math.ceil(total / limit) }
+    );
   } catch (e) {
     next(e);
   }
@@ -130,7 +124,7 @@ router.get("/my", auth, async (req, res, next) => {
       .sort({ createdAt: -1 })
       .limit(50);
 
-    res.json({ ok: true, txs });
+    return res.success({ txs }, "Transactions fetched");
   } catch (e) {
     next(e);
   }
@@ -166,13 +160,10 @@ router.get("/summary", auth, async (req, res, next) => {
       ? Math.round((successCount / totalCount) * 100)
       : 0;
 
-    res.json({
-      ok: true,
-      totalCount,
-      successCount,
-      successRate,
-      byStatus,
-    });
+    return res.success(
+      { totalCount, successCount, successRate, byStatus },
+      "Summary fetched"
+    );
   } catch (e) {
     next(e);
   }
@@ -188,9 +179,8 @@ router.get("/:id", auth, async (req, res, next) => {
       userId: req.user.sub,
     });
 
-    if (!tx) return res.status(404).json({ ok: false, error: "Transaction not found" });
-
-    res.json({ ok: true, tx });
+    if (!tx) return res.fail("Transaction not found", 404);
+    return res.success({ tx }, "Transaction fetched");
   } catch (e) {
     next(e);
   }
@@ -206,15 +196,11 @@ router.post("/:id/requery", auth, async (req, res, next) => {
       userId: req.user.sub,
     });
 
-    if (!tx) return res.status(404).json({ ok: false, error: "Transaction not found" });
+    if (!tx) return res.fail("Transaction not found", 404);
 
     // Provider requery depends on Peyflex endpoint.
     // Keep stable API for frontend now.
-    return res.status(501).json({
-      ok: false,
-      error: "Requery not implemented yet for this provider",
-      tx,
-    });
+    return res.fail("Requery not implemented yet for this provider", 501, { tx });
   } catch (e) {
     next(e);
   }

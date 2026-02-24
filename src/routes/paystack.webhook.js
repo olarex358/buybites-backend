@@ -1,14 +1,13 @@
 const router = require("express").Router();
-const express = require("express");
 const crypto = require("crypto");
 
 const User = require("../models/User");
 const WalletTx = require("../models/WalletTx");
 
-// RAW body for signature validation
+// NOTE: server.js mounts this route with express.raw({ type: "application/json" })
+// so DO NOT add any JSON parser here.
 router.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
+  "/",
   async (req, res) => {
     try {
       const signature = req.headers["x-paystack-signature"];

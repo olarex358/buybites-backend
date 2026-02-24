@@ -6,16 +6,16 @@ const { verifyMeter } = require("../services/tx.electricity");
 const { createUnifiedTx } = require("../services/tx.engine");
 
 router.get("/discos", auth, (req, res) => {
-  res.json({
-    ok: true,
-    discos: ["IKEDC", "EKEDC", "AEDC", "IBEDC", "PHED", "KEDCO", "JED", "KAEDCO"],
-  });
+  return res.success(
+    { discos: ["IKEDC", "EKEDC", "AEDC", "IBEDC", "PHED", "KEDCO", "JED", "KAEDCO"] },
+    "Discos fetched"
+  );
 });
 
 router.post("/verify", auth, async (req, res, next) => {
   try {
     const r = await verifyMeter(req.body);
-    res.json({ ok: true, data: r });
+    return res.success({ data: r }, "Meter verified");
   } catch (e) {
     next(e);
   }
@@ -40,13 +40,10 @@ router.post("/buy", auth, async (req, res, next) => {
       headers: req.headers,
     });
 
-    return res.json({
-      ok: true,
-      tx: out.tx,
-      provider: out.provider,
-      token: out.token || "",
-      deduped: !!out.deduped,
-    });
+    return res.success(
+      { tx: out.tx, provider: out.provider, token: out.token || "", deduped: !!out.deduped },
+      "Electricity purchase processed"
+    );
   } catch (e) {
     next(e);
   }

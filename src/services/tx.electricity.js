@@ -1,6 +1,6 @@
-const Pricing = require("../models/Pricing");
 const Transaction = require("../models/Transaction");
 const User = require("../models/User");
+const { priceForTier } = require("../utils/pricing.engine");
 const { verifyElectricity, buyElectricity } = require("./providers/peyflex.provider");
 const { newReference } = require("./tx.utils");
 
@@ -29,20 +29,14 @@ async function createElectricityTx({ userId, body, idempotencyKey }) {
     throw err;
   }
 
-  const pricing = await Pricing.findOne({
+  const p = await priceForTier({
     serviceType: "ELECTRICITY",
-    network: disco,         // using disco as "network"
-    productCode: meterType, // PREPAID/POSTPAID
-    isActive: true,
+    tier,
+    network: disco,
+    productCode: meterType,
+    defaultSellPrice: amountInput,
+    defaultBaseCost: 0,
   });
-
-  const sellPrice =
-    Number(pricing?.prices?.[tier]) ||
-    Number(pricing?.prices?.USER) ||
-    amountInput;
-
-  const baseCost = Number(pricing?.baseCost || 0);
-  const profit = Math.max(0, sellPrice - baseCost);
 
   const reference = newReference("EL");
 
@@ -51,10 +45,10 @@ async function createElectricityTx({ userId, body, idempotencyKey }) {
     type: "ELECTRICITY",
     provider: "PEYFLEX",
     tierAtPurchase: tier,
-    sellPrice,
-    baseCost,
-    profit,
-    amount: sellPrice,
+    sellPrice: p.sellPrice,
+    baseCost: p.baseCost,
+    profit: p.profit,
+    amount: p.sellPrice,
     reference,
     idempotencyKey: idempotencyKey || "",
     status: "PROCESSING",
