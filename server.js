@@ -109,6 +109,27 @@ async function start() {
     console.error("❌ Startup failed:", e.message || e);
     process.exit(1);
   }
-}
+}// -------------------- Health --------------------
+app.get("/api/health", async (req, res) => {
+  try {
+    const mongoose = require("mongoose");
+
+    const dbState = mongoose.connection.readyState;
+    const dbConnected = dbState === 1;
+
+    res.json({
+      ok: true,
+      service: "BuyBites API",
+      uptime: process.uptime(),
+      db: dbConnected ? "connected" : "disconnected",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: "Health check failed",
+    });
+  }
+}); 
 
 start();
