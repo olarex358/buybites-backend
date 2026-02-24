@@ -10,14 +10,14 @@ const { apiLimiter } = require("./src/middleware/rateLimit");
 const { notFound, errorHandler } = require("./src/middleware/error");
 const responseMiddleware = require("./src/middleware/response");
 const { seedAdmin } = require("./src/utils/seedAdmin");
-
+const { response } = require("./src/middleware/response");
 const app = express();
 app.set("trust proxy", 1);
 
 // -------------------- Security + logs --------------------
 app.use(helmet());
 app.use(morgan("dev"));
-
+app.use(response); // ✅ function
 // -------------------- CORS (SAFE allowlist) --------------------
 // Add your real frontend URL(s) in .env as FRONTEND_URL=https://your-frontend.com
 // You can add more allowed origins by separating with commas in FRONTEND_URLS
