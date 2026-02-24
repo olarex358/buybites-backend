@@ -1,5 +1,5 @@
 const bcrypt = require("bcryptjs");
-const User = require("../models/user");
+const User = require("../models/User");
 
 async function seedAdmin() {
   const phone = process.env.SEED_ADMIN_PHONE;
