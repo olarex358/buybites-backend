@@ -2,12 +2,13 @@ const mongoose = require("mongoose");
 
 const DataPlanSchema = new mongoose.Schema(
   {
-    network: { type: String, required: true },
-    plan_code: { type: String, required: true },
-    title: { type: String, default: "" },
-    sellPrice: { type: Number, required: true },
-    costPrice: { type: Number, default: 0 },
-    isActive: { type: Boolean, default: true }
+    network:        { type: String, required: true },  // MTN | GLO | AIRTEL | 9MOBILE
+    plan_code:      { type: String, required: true },
+    title:          { type: String, default: "" },
+    sellPrice:      { type: Number, required: true },
+    costPrice:      { type: Number, default: 0 },
+    isActive:       { type: Boolean, default: true },
+    peyflexNetwork: { type: String, default: "" },     // exact identifier sent to Peyflex e.g. mtn_gifting_data
   },
   { timestamps: true }
 );
