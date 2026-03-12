@@ -11,10 +11,10 @@
  * ─────────────────────────────────────────────
  */
 
-require("dotenv").config();
+require("dotenv").config({ path: require("path").join(__dirname, "../../.env") });
 const mongoose = require("mongoose");
 const axios    = require("axios");
-const DataPlan = require("../src/models/DataPlan");
+const DataPlan = require("./models/DataPlan");
 
 const NETWORKS = ["mtn", "glo", "airtel", "9mobile"];
 
