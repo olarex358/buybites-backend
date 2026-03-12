@@ -3,7 +3,7 @@ const crypto   = require("crypto");
 const axios    = require("axios");
 const router   = express.Router();
 
-const { protect } = require("../middleware/auth");
+const { auth } = require("../middleware/auth");
 const WalletTx    = require("../models/WalletTx");   // adjust path if needed
 const User        = require("../models/User");         // adjust path if needed
 
@@ -38,12 +38,12 @@ async function koraRequest(method, path, data = null) {
 // ─────────────────────────────────────────────
 //  GET /api/wallet/balance
 // ─────────────────────────────────────────────
-router.get("/balance", protect, async (req, res) => {
+router.get("/balance", auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select("walletBalance");
+    const user = await User.findById(req.user.sub).select("walletBalance");
     res.success({ walletBalance: user?.walletBalance ?? 0 });
   } catch (e) {
-    res.error(e.message || "Could not fetch balance", 500);
+    res.fail(e.message || "Could not fetch balance", 500);
   }
 });
 
@@ -52,17 +52,17 @@ router.get("/balance", protect, async (req, res) => {
 //  Body: { amount: Number }
 //  Returns: { checkout_url, reference, public_key }
 // ─────────────────────────────────────────────
-router.post("/fund/init", protect, async (req, res) => {
+router.post("/fund/init", auth, async (req, res) => {
   try {
     const amount = Number(req.body.amount);
     if (!amount || amount < 100) {
-      return res.error("Minimum funding amount is ₦100", 400);
+      return res.fail("Minimum funding amount is ₦100", 400);
     }
     if (amount > 5_000_000) {
-      return res.error("Maximum funding amount is ₦5,000,000", 400);
+      return res.fail("Maximum funding amount is ₦5,000,000", 400);
     }
 
-    const user      = await User.findById(req.user._id).select("phone fullName email");
+    const user      = await User.findById(req.user.sub).select("phone fullName email");
     const reference = `BB_FUND_${Date.now()}_${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
 
     // Create Korapay checkout charge
@@ -91,7 +91,7 @@ router.post("/fund/init", protect, async (req, res) => {
 
     // Save pending WalletTx so we can match on webhook
     await WalletTx.create({
-      user:      user._id,
+      userId:    user._id,
       type:      "FUND",
       amount,
       reference,
@@ -107,7 +107,7 @@ router.post("/fund/init", protect, async (req, res) => {
     });
   } catch (e) {
     console.error("[wallet/fund/init]", e?.response?.data || e.message);
-    res.error(e?.response?.data?.message || e.message || "Failed to initialize payment", 500);
+    res.fail(e?.response?.data?.message || e.message || "Failed to initialize payment", 500);
   }
 });
 
@@ -167,7 +167,7 @@ router.post("/korapay/webhook", express.raw({ type: "application/json" }), async
     }
 
     // ── Credit wallet ──
-    await User.findByIdAndUpdate(walletTx.user, {
+    await User.findByIdAndUpdate(walletTx.userId, {
       $inc: { walletBalance: walletTx.amount },
     });
 
@@ -190,17 +190,14 @@ router.post("/korapay/webhook", express.raw({ type: "application/json" }), async
 //  Frontend polls this after returning from checkout
 //  to confirm if payment went through
 // ─────────────────────────────────────────────
-router.get("/verify/:reference", protect, async (req, res) => {
+router.get("/verify/:reference", auth, async (req, res) => {
   try {
     const { reference } = req.params;
 
-    const walletTx = await WalletTx.findOne({
-      reference,
-      user: req.user._id,
-    });
+    const walletTx = await WalletTx.findOne({ reference, userId: req.user.sub });
 
     if (!walletTx) {
-      return res.error("Transaction not found", 404);
+      return res.fail("Transaction not found", 404);
     }
 
     // If still pending, check with Korapay directly
@@ -209,7 +206,7 @@ router.get("/verify/:reference", protect, async (req, res) => {
         const verify = await koraRequest("GET", `/charges/${reference}`);
         if (verify.data?.status === "success") {
           // Webhook might have been delayed — credit now
-          await User.findByIdAndUpdate(req.user._id, {
+          await User.findByIdAndUpdate(req.user.sub, {
             $inc: { walletBalance: walletTx.amount },
           });
           walletTx.status = "SUCCESS";
@@ -220,7 +217,7 @@ router.get("/verify/:reference", protect, async (req, res) => {
       }
     }
 
-    const user = await User.findById(req.user._id).select("walletBalance");
+    const user = await User.findById(req.user.sub).select("walletBalance");
 
     res.success({
       status:        walletTx.status,
@@ -229,7 +226,7 @@ router.get("/verify/:reference", protect, async (req, res) => {
       walletBalance: user?.walletBalance ?? 0,
     });
   } catch (e) {
-    res.error(e.message || "Verification failed", 500);
+    res.fail(e.message || "Verification failed", 500);
   }
 });
 
