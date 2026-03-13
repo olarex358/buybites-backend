@@ -1,341 +1,211 @@
 const router = require("express").Router();
-const { adminOnly } = require("../middleware/admin");
-
-const User = require("../models/User");
-const WalletTx = require("../models/WalletTx");
-const Order = require("../models/Order");
-const DataPlan = require("../models/DataPlan");
-const Pricing = require("../models/Pricing");
-const { z } = require("zod");
-const { auth } = require("../middleware/auth"); // you already have this
-const { cleanPhone } = require("../utils/phone");
 const bcrypt = require("bcryptjs");
+const User   = require("../models/User");
+const { auth } = require("../middleware/auth");
 
+// ─── helpers ────────────────────────────────────────────────────────────────
 
-router.use(auth);
-router.use(adminOnly);
-
-// ---------- helpers ----------
-function toInt(v, def) {
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : def;
-}
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-function csvEscape(val) {
-  const s = String(val ?? "");
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
-function toCsv(rows, columns) {
-  const head = columns.map(c => csvEscape(c.label)).join(",");
-  const body = rows.map(r =>
-    columns.map(c => csvEscape(typeof c.value === "function" ? c.value(r) : r[c.value])).join(",")
-  ).join("\n");
-  return `${head}\n${body}\n`;
+function isAdminKey(req) {
+  const key = req.headers["x-admin-key"];
+  return key && process.env.ADMIN_KEY && key === process.env.ADMIN_KEY;
 }
 
-// ✅ 1) STATS
-router.get("/stats", async (req, res, next) => {
+function requireAdminRole(req, res, next) {
+  if ((req.user?.role || "").toUpperCase() !== "ADMIN") {
+    return res.status(403).json({ ok: false, error: "Admin access required" });
+  }
+  next();
+}
+
+// normalize phone exactly like auth.routes does
+function normalizePhone(raw) {
+  let p = String(raw || "").replace(/\D/g, "").trim();
+  if (p.startsWith("0") && p.length === 11)       p = "234" + p.slice(1);
+  else if (p.startsWith("234") && p.length === 13) { /* ok */ }
+  else if (p.length === 10)                         p = "234" + p;
+  return p;
+}
+
+// ─── POST /api/admin/setup ───────────────────────────────────────────────────
+//  ONE-TIME: Create or promote your admin account
+//  Header:   x-admin-key: YOUR_ADMIN_KEY   (the ADMIN_KEY in your .env)
+//  Body:     { phone: "08012345678", pin: "1234" }
+//
+//  • If phone already exists  → promotes that user to ADMIN (keeps their existing PIN)
+//  • If phone is brand new    → creates account with pinHash (salt 12, matches your auth)
+// ────────────────────────────────────────────────────────────────────────────
+router.post("/setup", async (req, res) => {
   try {
-    const [users, orders, walletTx, activePlans] = await Promise.all([
-      User.countDocuments(),
-      Order.countDocuments(),
-      WalletTx.countDocuments(),
-      DataPlan.countDocuments({ isActive: true }),
-    ]);
+    if (!isAdminKey(req)) {
+      return res.status(403).json({ ok: false, error: "Invalid admin key" });
+    }
 
-    const [delivered, refunded, processing, failed] = await Promise.all([
-      Order.countDocuments({ status: "DELIVERED" }),
-      Order.countDocuments({ status: "REFUNDED" }),
-      Order.countDocuments({ status: "PROCESSING" }),
-      Order.countDocuments({ status: "FAILED" }),
-    ]);
+    const { phone: rawPhone, pin } = req.body;
+    if (!rawPhone || !pin) {
+      return res.status(400).json({ ok: false, error: "phone and pin are required" });
+    }
+
+    const pinStr = String(pin).replace(/\D/g, "");
+    if (!/^\d{4,8}$/.test(pinStr)) {
+      return res.status(400).json({ ok: false, error: "PIN must be 4-8 digits" });
+    }
+
+    // Check if an ADMIN already exists
+    const existingAdmin = await User.findOne({ role: "ADMIN" });
+    if (existingAdmin) {
+      return res.status(409).json({
+        ok: false,
+        error: "Admin already exists. Just login normally with phone + PIN.",
+        phone: existingAdmin.phone,
+      });
+    }
+
+    const phone = normalizePhone(rawPhone);
+
+    // Phone already registered? Just promote, keep their PIN
+    const existingUser = await User.findOne({ phone });
+    if (existingUser) {
+      existingUser.role = "ADMIN";
+      await existingUser.save();
+      return res.json({
+        ok: true,
+        message: `✅ ${phone} promoted to ADMIN. Login with your existing PIN.`,
+        user: { _id: existingUser._id, phone: existingUser.phone, role: existingUser.role },
+      });
+    }
+
+    // Brand new — hash with salt 12 to match auth.routes
+    const pinHash = await bcrypt.hash(pinStr, 12);
+
+    const admin = await User.create({
+      phone,
+      pinHash,
+      role:               "ADMIN",
+      walletBalance:      0,
+      isVerified:         true,
+      failedLoginAttempts: 0,
+    });
 
     return res.json({
       ok: true,
-      stats: { users, orders, walletTx, activePlans, delivered, refunded, processing, failed },
+      message: `✅ Admin created for ${phone}. Login with phone + PIN in the app.`,
+      user: { _id: admin._id, phone: admin.phone, role: admin.role },
     });
   } catch (e) {
-    next(e);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// ✅ 2) USERS (search + pagination)
-router.get("/users", async (req, res, next) => {
+// ─── GET /api/admin/users ────────────────────────────────────────────────────
+//  Query params: ?role=AGENT&search=john&page=1&limit=20
+// ────────────────────────────────────────────────────────────────────────────
+router.get("/users", auth, requireAdminRole, async (req, res) => {
   try {
-    const page = clamp(toInt(req.query.page, 1), 1, 100000);
-    const limit = clamp(toInt(req.query.limit, 20), 5, 100);
-    const q = String(req.query.q || "").trim();
-
-    const filter = q
-      ? { $or: [{ phone: new RegExp(q, "i") }, { fullName: new RegExp(q, "i") }] }
-      : {};
-
-    const [total, users] = await Promise.all([
-      User.countDocuments(filter),
-      User.find(filter)
-        .select("phone fullName walletBalance isBlocked role tier totalVolume totalProfit createdAt")
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit),
-    ]);
-
-    return res.json({ ok: true, page, limit, total, users });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// ✅ 3) ORDERS (filters + pagination)
-router.get("/orders", async (req, res, next) => {
-  try {
-    const page = clamp(toInt(req.query.page, 1), 1, 100000);
-    const limit = clamp(toInt(req.query.limit, 20), 5, 100);
-
-    const status = String(req.query.status || "").trim();   // DELIVERED/PROCESSING/FAILED/REFUNDED
-    const network = String(req.query.network || "").trim(); // mtn_sme_data...
-    const phone = String(req.query.phone || "").trim();     // contains
-
+    const { role, search, page = 1, limit = 20 } = req.query;
     const filter = {};
-    if (status) filter.status = status;
-    if (network) filter.network = network;
-    if (phone) filter.mobile_number = new RegExp(phone, "i");
 
-    const [total, orders] = await Promise.all([
-      Order.countDocuments(filter),
-      Order.find(filter)
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit),
+    if (role) filter.role = role.toUpperCase();
+    if (search) {
+      filter.$or = [
+        { fullName: { $regex: search, $options: "i" } },
+        { phone:    { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const total = await User.countDocuments(filter);
+    const users = await User.find(filter)
+      .select("fullName phone role tier walletBalance createdAt referralCode isVerified")
+      .sort({ createdAt: -1 })
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit))
+      .lean();
+
+    return res.json({ ok: true, total, page: Number(page), users });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── PATCH /api/admin/users/:id/role ─────────────────────────────────────────
+//  Body: { role: "AGENT"|"USER"|"ADMIN", tier: "BASIC"|"SILVER"|"GOLD"|"PLATINUM" }
+// ────────────────────────────────────────────────────────────────────────────
+router.patch("/users/:id/role", auth, requireAdminRole, async (req, res) => {
+  try {
+    const { role, tier } = req.body;
+    const validRoles = ["USER", "AGENT", "ADMIN"];
+    const validTiers = ["BASIC", "SILVER", "GOLD", "PLATINUM"];
+
+    if (role && !validRoles.includes(role.toUpperCase())) {
+      return res.status(400).json({ ok: false, error: `Role must be: ${validRoles.join(", ")}` });
+    }
+    if (tier && !validTiers.includes(tier.toUpperCase())) {
+      return res.status(400).json({ ok: false, error: `Tier must be: ${validTiers.join(", ")}` });
+    }
+
+    const update = {};
+    if (role) update.role = role.toUpperCase();
+    if (tier) update.tier = tier.toUpperCase();
+
+    const user = await User.findByIdAndUpdate(req.params.id, update, { new: true })
+      .select("-pinHash");
+
+    if (!user) return res.status(404).json({ ok: false, error: "User not found" });
+
+    return res.json({
+      ok: true,
+      message: `✅ ${user.phone} → ${user.role}${user.tier ? ` (${user.tier})` : ""}`,
+      user,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── PATCH /api/admin/users/:id/wallet ───────────────────────────────────────
+//  Body: { amount: 500, type: "CREDIT"|"DEBIT", note: "reason" }
+// ────────────────────────────────────────────────────────────────────────────
+router.patch("/users/:id/wallet", auth, requireAdminRole, async (req, res) => {
+  try {
+    const { amount, type = "CREDIT" } = req.body;
+
+    if (!amount || isNaN(amount) || Number(amount) <= 0) {
+      return res.status(400).json({ ok: false, error: "Valid positive amount required" });
+    }
+
+    const delta = type.toUpperCase() === "DEBIT"
+      ? -Math.abs(Number(amount))
+      :  Math.abs(Number(amount));
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { $inc: { walletBalance: delta } },
+      { new: true }
+    ).select("fullName phone walletBalance");
+
+    if (!user) return res.status(404).json({ ok: false, error: "User not found" });
+
+    return res.json({
+      ok: true,
+      message: `${type} ₦${Number(amount).toLocaleString()} → ${user.phone}. Balance: ₦${user.walletBalance.toLocaleString()}`,
+      walletBalance: user.walletBalance,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── GET /api/admin/stats ─────────────────────────────────────────────────────
+router.get("/stats", auth, requireAdminRole, async (req, res) => {
+  try {
+    const [totalUsers, totalAgents, newToday] = await Promise.all([
+      User.countDocuments({ role: { $ne: "ADMIN" } }),
+      User.countDocuments({ role: "AGENT" }),
+      User.countDocuments({ createdAt: { $gte: new Date(Date.now() - 86400000) } }),
     ]);
-
-    return res.json({ ok: true, page, limit, total, orders });
+    return res.json({ ok: true, stats: { totalUsers, totalAgents, newToday } });
   } catch (e) {
-    next(e);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// ✅ 4) WALLET TX (filters + pagination)
-router.get("/wallet-tx", async (req, res, next) => {
-  try {
-    const page = clamp(toInt(req.query.page, 1), 1, 100000);
-    const limit = clamp(toInt(req.query.limit, 20), 5, 100);
-
-    const type = String(req.query.type || "").trim();       // FUND/DEBIT/CREDIT
-    const status = String(req.query.status || "").trim();   // PENDING/SUCCESS/FAILED
-    const userId = String(req.query.userId || "").trim();   // optional
-
-    const filter = {};
-    if (type) filter.type = type;
-    if (status) filter.status = status;
-    if (userId) filter.userId = userId;
-
-    const [total, tx] = await Promise.all([
-      WalletTx.countDocuments(filter),
-      WalletTx.find(filter)
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit),
-    ]);
-
-    return res.json({ ok: true, page, limit, total, tx });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// ✅ 5) PLANS (filters)
-router.get("/plans", async (req, res, next) => {
-  try {
-    const network = String(req.query.network || "").trim();
-    const isActive = String(req.query.isActive || "").trim(); // "true" | "false" | ""
-
-    const filter = {};
-    if (network) filter.network = network;
-    if (isActive === "true") filter.isActive = true;
-    if (isActive === "false") filter.isActive = false;
-
-    const plans = await DataPlan.find(filter).sort({ network: 1, sellPrice: 1 });
-    return res.json({ ok: true, plans });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// ✅ 6) EXPORT: ORDERS CSV
-router.get("/export/orders.csv", async (req, res, next) => {
-  try {
-    const limit = clamp(toInt(req.query.limit, 5000), 100, 20000);
-    const orders = await Order.find({}).sort({ createdAt: -1 }).limit(limit);
-
-    const csv = toCsv(orders, [
-      { label: "id", value: "_id" },
-      { label: "userId", value: "userId" },
-      { label: "network", value: "network" },
-      { label: "plan_code", value: "plan_code" },
-      { label: "mobile_number", value: "mobile_number" },
-      { label: "amount", value: "amount" },
-      { label: "status", value: "status" },
-      { label: "providerRef", value: "providerRef" },
-      { label: "lastError", value: "lastError" },
-      { label: "createdAt", value: (r) => r.createdAt },
-    ]);
-
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="orders.csv"`);
-    return res.send(csv);
-  } catch (e) {
-    next(e);
-  }
-});
-
-// ✅ 7) EXPORT: WALLET TX CSV
-router.get("/export/wallet.csv", async (req, res, next) => {
-  try {
-    const limit = clamp(toInt(req.query.limit, 5000), 100, 20000);
-    const tx = await WalletTx.find({}).sort({ createdAt: -1 }).limit(limit);
-
-    const csv = toCsv(tx, [
-      { label: "id", value: "_id" },
-      { label: "userId", value: "userId" },
-      { label: "type", value: "type" },
-      { label: "amount", value: "amount" },
-      { label: "reference", value: "reference" },
-      { label: "status", value: "status" },
-      { label: "createdAt", value: (r) => r.createdAt },
-    ]);
-
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="wallet_tx.csv"`);
-    return res.send(csv);
-  } catch (e) {
-    next(e);
-  }
-});
-
-// ✅ 8) PRICING (manual tier pricing)
-router.get("/pricing", async (req, res, next) => {
-  try {
-    const serviceType = String(req.query.serviceType || "").trim();
-    const network = String(req.query.network || "").trim();
-    const productCode = String(req.query.productCode || "").trim();
-
-    const filter = {};
-    if (serviceType) filter.serviceType = serviceType;
-    if (network) filter.network = network;
-    if (productCode) filter.productCode = productCode;
-
-    const items = await Pricing.find(filter).sort({ serviceType: 1, network: 1, productCode: 1 });
-    res.json({ ok: true, items });
-  } catch (e) {
-    next(e);
-  }
-});
-
-router.put("/pricing", async (req, res, next) => {
-  try {
-    const b = z.object({
-      serviceType: z.enum(["DATA", "AIRTIME", "ELECTRICITY", "TV", "PIN", "BETTING"]),
-      network: z.string().optional().default(""),
-      productCode: z.string().optional().default(""),
-      prices: z.object({
-        USER: z.number().optional(),
-        BASIC: z.number().optional(),
-        SILVER: z.number().optional(),
-        GOLD: z.number().optional(),
-        PLATINUM: z.number().optional(),
-      }).default({}),
-      baseCost: z.number().optional(),
-      isActive: z.boolean().optional(),
-    }).parse(req.body);
-
-    const doc = await Pricing.findOneAndUpdate(
-      { serviceType: b.serviceType, network: b.network, productCode: b.productCode },
-      {
-        serviceType: b.serviceType,
-        network: b.network,
-        productCode: b.productCode,
-        prices: {
-          USER: b.prices.USER ?? 0,
-          BASIC: b.prices.BASIC ?? 0,
-          SILVER: b.prices.SILVER ?? 0,
-          GOLD: b.prices.GOLD ?? 0,
-          PLATINUM: b.prices.PLATINUM ?? 0,
-        },
-        baseCost: b.baseCost ?? 0,
-        isActive: b.isActive ?? true,
-      },
-      { upsert: true, new: true }
-    );
-
-    res.json({ ok: true, item: doc });
-  } catch (e) {
-    next(e);
-  }
-});
-
-router.delete("/pricing/:id", async (req, res, next) => {
-  try {
-    await Pricing.findByIdAndDelete(req.params.id);
-    res.json({ ok: true });
-  } catch (e) {
-    next(e);
-  }
-});
-
-
-// ✅ Create Agent directly
-router.post("/agents", async (req, res, next) => {
-  try {
-  const b = z.object({
-    phone: z.string().min(8),
-    pin: z.string().min(4).max(8),
-    name: z.string().optional(),
-    tier: z.enum(["USER","BASIC","SILVER","GOLD","PLATINUM"]).optional(),
-  }).parse(req.body);
-
-  const phone = cleanPhone(b.phone) || b.phone;
-
-  const exists = await User.findOne({ phone }).select("_id");
-  if (exists) return res.status(409).json({ ok: false, error: "User already exists" });
-
-  const pinHash = await bcrypt.hash(String(b.pin), 12);
-
-  const agent = await User.create({
-    phone,
-    pinHash,
-    fullName: b.name || "",
-    role: "AGENT",
-    tier: b.tier || "BASIC",
-  });
-
-  res.json({ ok: true, agent: { id: agent._id, phone: agent.phone, role: agent.role, tier: agent.tier, fullName: agent.fullName } });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// ✅ Promote existing user to Agent/Admin
-router.patch("/users/:id/role", async (req, res, next) => {
-  try {
-  const b = z.object({
-    role: z.enum(["USER","AGENT","ADMIN"]),
-    tier: z.enum(["USER","BASIC","SILVER","GOLD","PLATINUM"]).optional(),
-  }).parse(req.body);
-
-  const updated = await User.findByIdAndUpdate(
-    req.params.id,
-    { role: b.role, ...(b.tier ? { tier: b.tier } : {}) },
-    { new: true }
-  ).select("phone fullName role tier");
-
-  if (!updated) return res.status(404).json({ ok: false, error: "User not found" });
-
-  res.json({ ok: true, user: updated });
-  } catch (e) {
-    next(e);
-  }
-});
 module.exports = router;
