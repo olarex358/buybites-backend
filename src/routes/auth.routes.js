@@ -418,5 +418,76 @@ router.post("/device/reset/confirm", authLimiter, requireDeviceId, async (req, r
     next(e);
   }
 });
+// ─────────────────────────────────────────────────────────────────────────────
+// ADD THIS ROUTE to your existing src/routes/auth.routes.js
+// Place it near the bottom, before module.exports = router;
+// ─────────────────────────────────────────────────────────────────────────────
 
+// ✅ GET /api/auth/me  — returns current logged-in user profile
+router.get("/me", auth, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.sub)
+      .select("-pinHash")
+      .lean();
+
+    if (!user) return res.status(404).json({ ok: false, error: "User not found" });
+
+    return res.json({
+      ok: true,
+      user: {
+        id:           user._id,
+        phone:        user.phone,
+        fullName:     user.fullName || "",
+        role:         user.role     || "USER",
+        tier:         user.tier     || "BASIC",
+        isVerified:   user.isVerified || false,
+        walletBalance: user.walletBalance || 0,
+        referralCode: user.referralCode || "",
+        createdAt:    user.createdAt,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ✅ GET /api/auth/referrals — referral stats for the Referrals page
+router.get("/referrals", auth, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.sub)
+      .select("referralCode phone")
+      .lean();
+
+    if (!user) return res.status(404).json({ ok: false, error: "User not found" });
+
+    // Find users who registered with this referral code
+    const referralCode = user.referralCode || user.phone;
+    const referred = await User.find({ referredBy: referralCode })
+      .select("fullName phone createdAt walletBalance")
+      .lean();
+
+    const totalInvited   = referred.length;
+    const totalConverted = referred.filter(u => (u.walletBalance || 0) > 0).length;
+
+    return res.json({
+      ok: true,
+      refCode:    referralCode,
+      stats: {
+        totalInvited,
+        totalConverted,
+        totalBonus:   0,   // extend later with bonus tracking
+        pendingBonus: 0,
+      },
+      referrals: referred.map(u => ({
+        _id:         u._id,
+        phone:       u.phone,
+        fullName:    u.fullName || "",
+        createdAt:   u.createdAt,
+        hasPurchased: (u.walletBalance || 0) > 0,
+      })),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 module.exports = router;
