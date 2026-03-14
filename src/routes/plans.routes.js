@@ -135,5 +135,68 @@ router.delete("/:id", async (req, res) => {
   await DataPlan.findByIdAndUpdate(req.params.id, { isActive: false });
   return res.json({ ok: true });
 });
+// ─────────────────────────────────────────────────────────────────────────────
+// ADD THIS to src/routes/plans.routes.js
+// Place it BEFORE the module.exports = router; line at the bottom
+// ─────────────────────────────────────────────────────────────────────────────
 
+// ── POST /api/plans/markup ────────────────────────────────────
+//  Applies a % markup to all active plans' sellPrice
+//  Body: { markupPercent: 5, network: "MTN" (optional), maxAmount: 200000 }
+//  x-admin-key header required
+router.post("/markup", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ ok: false, error: "Admin only" });
+
+  try {
+    const {
+      markupPercent = 5,
+      network,          // optional — omit to update ALL networks
+      maxAmount = 200000, // skip plans with costPrice above this (bad data guard)
+    } = req.body;
+
+    if (markupPercent <= 0 || markupPercent > 100) {
+      return res.status(400).json({ ok: false, error: "markupPercent must be 1–100" });
+    }
+
+    // Build filter
+    const filter = { isActive: true };
+    if (network) filter.network = String(network).toUpperCase().trim();
+
+    const plans = await DataPlan.find(filter).lean();
+    let updated = 0;
+    let skipped = 0;
+
+    for (const plan of plans) {
+      const base = Number(plan.costPrice || 0);
+
+      // Skip bad data (e.g. ₦538,500 plan)
+      if (maxAmount && base > maxAmount) {
+        skipped++;
+        continue;
+      }
+
+      // Use costPrice as base; if 0, use current sellPrice as base
+      const baseCost = base > 0 ? base : Number(plan.sellPrice || 0);
+      if (!baseCost) { skipped++; continue; }
+
+      // Calculate new sell price — round UP to nearest ₦5 for clean prices
+      const raw      = baseCost * (1 + markupPercent / 100);
+      const sellPrice = Math.ceil(raw / 5) * 5;
+
+      await DataPlan.findByIdAndUpdate(plan._id, { sellPrice });
+      updated++;
+    }
+
+    return res.json({
+      ok: true,
+      updated,
+      skipped,
+      markupPercent,
+      network: network || "ALL",
+      message: `✅ ${updated} plans updated with ${markupPercent}% markup`,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
 module.exports = router;
