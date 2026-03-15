@@ -199,4 +199,117 @@ router.post("/markup", async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 });
+// ─────────────────────────────────────────────────────────────────────────────
+// ADD THIS to src/routes/plans.routes.js before module.exports = router;
+// ─────────────────────────────────────────────────────────────────────────────
+
+function cleanPlanTitle(raw = "") {
+  return raw
+    .replace(/\s*=\s*[N₦][\d,]+(\.\d+)?\s*/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// POST /api/plans/clean-titles — one-time fix for existing plan titles
+router.post("/clean-titles", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ ok: false, error: "Admin only" });
+
+  try {
+    const plans = await DataPlan.find({}).lean();
+    let updated = 0;
+
+    for (const plan of plans) {
+      const cleaned = cleanPlanTitle(plan.title || "");
+      if (cleaned !== plan.title) {
+        await DataPlan.findByIdAndUpdate(plan._id, { title: cleaned });
+        updated++;
+      }
+    }
+
+    return res.json({ ok: true, updated, message: `✅ ${updated} plan titles cleaned` });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+// ADD THESE to src/routes/plans.routes.js
+// ─────────────────────────────────────────────────────────────────────────────
+
+const { getDataPlans: smeGetPlans } = require("../services/providers/smedata.provider");
+
+// SMEData network identifiers
+const SMEDATA_NETWORKS = [
+  { id: "mtn",     displayNetwork: "MTN"     },
+  { id: "glo",     displayNetwork: "GLO"     },
+  { id: "airtel",  displayNetwork: "AIRTEL"  },
+  { id: "9mobile", displayNetwork: "9MOBILE" },
+];
+
+// ── POST /api/plans/smedata-sync ──────────────────────────────
+// Syncs SMEData plans into DB — marks them with provider: "SMEDATA"
+// Run this after you get your SMEData API token
+router.post("/smedata-sync", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ ok: false, error: "Admin only" });
+
+  if (!process.env.SMEDATA_TOKEN) {
+    return res.status(400).json({
+      ok: false,
+      error: "SMEDATA_TOKEN not set in .env. Register at smedata.ng first.",
+    });
+  }
+
+  const results = [];
+  let totalSynced = 0;
+
+  for (const { id, displayNetwork } of SMEDATA_NETWORKS) {
+    try {
+      const r = await smeGetPlans({ network: id });
+
+      // SMEData returns array of plans
+      const list = Array.isArray(r) ? r
+        : Array.isArray(r?.data) ? r.data
+        : Array.isArray(r?.plans) ? r.plans
+        : [];
+
+      let synced = 0;
+
+      for (const item of list) {
+        // SMEData fields: id, network, plan_type, month_validate, plan, amount
+        const plan_code  = String(item.id || item.plan_id || "").trim();
+        const title      = String(item.plan || item.description || plan_code).trim();
+        const costPrice  = Number(item.amount || item.price || 0);
+        const sellPrice  = Math.ceil(costPrice * 1.05 / 5) * 5; // 5% markup rounded to ₦5
+
+        if (!plan_code || !costPrice) continue;
+
+        await DataPlan.findOneAndUpdate(
+          { network: displayNetwork, plan_code: `SME_${plan_code}` },
+          {
+            network:        displayNetwork,
+            plan_code:      `SME_${plan_code}`,  // prefix to avoid conflict with Peyflex codes
+            title:          title.replace(/\s*=\s*[N₦][\d,]+(\.\d+)?\s*/gi, " ").trim(),
+            sellPrice,
+            costPrice,
+            isActive:       true,
+            peyflexNetwork: id,                  // reuse field for SMEData network id
+            provider:       "SMEDATA",           // ✅ mark as SMEData plan
+          },
+          { upsert: true, new: true }
+        );
+        synced++;
+      }
+
+      results.push({ network: displayNetwork, synced });
+      totalSynced += synced;
+    } catch (e) {
+      results.push({
+        network: displayNetwork,
+        synced: 0,
+        error: e?.response?.data || e.message,
+      });
+    }
+  }
+
+  return res.json({ ok: true, totalSynced, results });
+});
 module.exports = router;

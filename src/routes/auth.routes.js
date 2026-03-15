@@ -19,7 +19,12 @@ const OTP_COOLDOWN_SECONDS = 60;
 const OTP_MAX_ATTEMPTS = 5;
 
 // ----------------- schemas -----------------
-const schemaReg = z.object({ phone: z.string().min(8), pin: z.string().min(4).max(8) });
+const schemaReg = z.object({
+  phone: z.string().min(8),
+  pin: z.string().min(4).max(8),
+  fullName: z.string().optional(),
+  referralCode: z.string().optional(),
+});
 const schemaLogin = z.object({ phone: z.string().min(8), pin: z.string().min(4).max(8) });
 
 const schemaOtpReq = z.object({
@@ -189,23 +194,43 @@ router.post("/register", authLimiter, requireDeviceId, async (req, res, next) =>
 
     const pinHash = await bcrypt.hash(pin, 12);
 
+    let referredBy = null;
+    if (parsed.referralCode) {
+      const code = String(parsed.referralCode).trim().toUpperCase();
+      const referrer = await User.findOne({ referralCode: code }).select("_id");
+      if (referrer) referredBy = code;
+    }
+
     const user = await User.create({
       phone,
       pinHash,
+      fullName: parsed.fullName || "",
       isVerified: false,
       failedLoginAttempts: 0,
       lockUntil: null,
       deviceId: req.deviceId,
       deviceBoundAt: new Date(),
+      referredBy,
     });
 
     const token = sign(user);
-    return res.json({ ok: true, token, user: { id: user._id, phone: user.phone, fullName: user.fullName, role: user.role, tier: user.tier, isVerified: user.isVerified } });
+    return res.json({
+      ok: true,
+      token,
+      user: {
+        id: user._id,
+        phone: user.phone,
+        fullName: user.fullName || "",
+        role: user.role,
+        tier: user.tier,
+        isVerified: user.isVerified,
+        referralCode: user.referralCode || "",
+      },
+    });
   } catch (e) {
     next(e);
   }
 });
-
 // ✅ Login + lockout + device match/bind
 router.post("/login", authLimiter, requireDeviceId, async (req, res, next) => {
   try {
@@ -418,32 +443,26 @@ router.post("/device/reset/confirm", authLimiter, requireDeviceId, async (req, r
     next(e);
   }
 });
-// ─────────────────────────────────────────────────────────────────────────────
-// ADD THIS ROUTE to your existing src/routes/auth.routes.js
-// Place it near the bottom, before module.exports = router;
-// ─────────────────────────────────────────────────────────────────────────────
-
 // ✅ GET /api/auth/me  — returns current logged-in user profile
 router.get("/me", auth, async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.sub)
-      .select("-pinHash")
-      .lean();
+    const user = await User.findById(req.user.sub).select("-pinHash").lean();
 
     if (!user) return res.status(404).json({ ok: false, error: "User not found" });
 
     return res.json({
       ok: true,
       user: {
-        id:           user._id,
-        phone:        user.phone,
-        fullName:     user.fullName || "",
-        role:         user.role     || "USER",
-        tier:         user.tier     || "BASIC",
-        isVerified:   user.isVerified || false,
+        id: user._id,
+        phone: user.phone,
+        fullName: user.fullName || "",
+        role: user.role || "USER",
+        tier: user.tier || "USER",
+        isVerified: user.isVerified || false,
         walletBalance: user.walletBalance || 0,
         referralCode: user.referralCode || "",
-        createdAt:    user.createdAt,
+        referredBy: user.referredBy || null,
+        createdAt: user.createdAt,
       },
     });
   } catch (e) {
@@ -454,35 +473,32 @@ router.get("/me", auth, async (req, res, next) => {
 // ✅ GET /api/auth/referrals — referral stats for the Referrals page
 router.get("/referrals", auth, async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.sub)
-      .select("referralCode phone")
-      .lean();
+    const user = await User.findById(req.user.sub).select("referralCode phone fullName").lean();
 
     if (!user) return res.status(404).json({ ok: false, error: "User not found" });
 
-    // Find users who registered with this referral code
     const referralCode = user.referralCode || user.phone;
     const referred = await User.find({ referredBy: referralCode })
       .select("fullName phone createdAt walletBalance")
       .lean();
 
-    const totalInvited   = referred.length;
-    const totalConverted = referred.filter(u => (u.walletBalance || 0) > 0).length;
+    const totalInvited = referred.length;
+    const totalConverted = referred.filter((u) => (u.walletBalance || 0) > 0).length;
 
     return res.json({
       ok: true,
-      refCode:    referralCode,
+      refCode: referralCode,
       stats: {
         totalInvited,
         totalConverted,
-        totalBonus:   0,   // extend later with bonus tracking
+        totalBonus: 0,
         pendingBonus: 0,
       },
-      referrals: referred.map(u => ({
-        _id:         u._id,
-        phone:       u.phone,
-        fullName:    u.fullName || "",
-        createdAt:   u.createdAt,
+      referrals: referred.map((u) => ({
+        _id: u._id,
+        phone: u.phone,
+        fullName: u.fullName || "",
+        createdAt: u.createdAt,
         hasPurchased: (u.walletBalance || 0) > 0,
       })),
     });
@@ -490,4 +506,5 @@ router.get("/referrals", auth, async (req, res, next) => {
     next(e);
   }
 });
+
 module.exports = router;

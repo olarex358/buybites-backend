@@ -8,6 +8,7 @@ const DataPlan = require("../models/DataPlan");
 const { genRef } = require("../utils/ref");
 const { cleanPhone, matchesNetwork } = require("../utils/phone");
 const { peyflexClient } = require("./peyflex.service");
+const { buyData: smeDataBuy } = require("./providers/smedata.provider");
 const { priceForTier } = require("../utils/pricing.engine");
 
 const { createAirtimeTx, processAirtimeTx } = require("./tx.airtime");
@@ -159,29 +160,40 @@ async function createDataTx({ userId, network, mobile_number, plan_code, idempot
   await ledgerDebit({ userId, tx, amount: tx.amount });
 
   // provider call with small retries
+  // provider call with small retries
   const api = peyflexClient();
   let providerRes = null;
   let lastErr = "";
+  const planProvider = String(plan.provider || "PEYFLEX").toUpperCase();
 
   for (let i = 1; i <= 3; i++) {
     try {
       tx.retries = i - 1;
       await tx.save();
 
-      const r = await api.post("/api/data/purchase/", {
-        network: body.network,
-        mobile_number: phone11,
-        plan_code: body.plan_code,
-        reference: tx.reference,
-      });
-      providerRes = r.data;
+      if (planProvider === "SMEDATA") {
+        providerRes = await smeDataBuy({
+          network: plan.peyflexNetwork || String(body.network).toLowerCase(),
+          planId: String(plan.plan_code || body.plan_code).replace(/^SME_/, ""),
+          phone: phone11,
+          reference: tx.reference,
+        });
+      } else {
+        const r = await api.post("/api/data/purchase/", {
+          network: body.network,
+          mobile_number: phone11,
+          plan_code: body.plan_code,
+          reference: tx.reference,
+        });
+        providerRes = r.data;
+      }
+
       break;
     } catch (e) {
       lastErr = e?.response?.data ? JSON.stringify(e.response.data) : e.message;
       await new Promise((r) => setTimeout(r, 600 * i));
     }
   }
-
   const txt = JSON.stringify(providerRes || "").toLowerCase();
   const ok = providerRes && (txt.includes("success") || txt.includes("delivered"));
   const providerRef = providerRes?.reference || providerRes?.ref || "";

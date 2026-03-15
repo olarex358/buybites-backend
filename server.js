@@ -94,6 +94,7 @@ app.use("/api/peyflex",     require("./src/routes/peyflex.routes"));
 app.use("/api/admin",       require("./src/routes/admin.routes"));
 app.use("/api/airtime",     require("./src/routes/airtime.routes"));
 app.use("/api/electricity", require("./src/routes/electricity.routes"));
+app.use("/api/cable", require("./src/routes/cable.routes"));
 
 // -------------------- Errors --------------------
 app.use(notFound);
