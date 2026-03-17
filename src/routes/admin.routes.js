@@ -151,22 +151,36 @@ router.patch("/users/:id/role", auth, requireAdminRole, async (req, res) => {
 // ── PATCH /api/admin/users/:id/wallet ────────────────────────
 router.patch("/users/:id/wallet", auth, requireAdminRole, async (req, res) => {
   try {
-    const { amount, type = "CREDIT" } = req.body;
+    const { amount, type = "CREDIT", note = "" } = req.body;
     if (!amount || isNaN(amount) || Number(amount) <= 0) {
       return res.status(400).json({ ok: false, error: "Valid positive amount required" });
     }
-    const delta = type.toUpperCase() === "DEBIT"
-      ? -Math.abs(Number(amount))
-      :  Math.abs(Number(amount));
+    const txType = type.toUpperCase() === "DEBIT" ? "DEBIT" : "CREDIT";
+    const delta  = txType === "DEBIT" ? -Math.abs(Number(amount)) : Math.abs(Number(amount));
 
     const user = await User.findByIdAndUpdate(
       req.params.id, { $inc: { walletBalance: delta } }, { new: true }
     ).select("fullName phone walletBalance");
     if (!user) return res.status(404).json({ ok: false, error: "User not found" });
 
+    // ✅ Audit trail: record every admin adjustment as a WalletTx
+    const { genRef } = require("../utils/ref");
+    await WalletTx.create({
+      userId:    user._id,
+      type:      txType,
+      amount:    Math.abs(Number(amount)),
+      reference: genRef("ADM"),
+      status:    "SUCCESS",
+      provider:  "ADMIN",
+      meta: {
+        adjustedBy: req.user.sub,
+        note: note || `Admin ${txType.toLowerCase()} adjustment`,
+      },
+    });
+
     return res.json({
       ok: true,
-      message: `${type} ₦${Number(amount).toLocaleString()} → ${user.phone}. Balance: ₦${user.walletBalance.toLocaleString()}`,
+      message: `${txType} ₦${Number(amount).toLocaleString()} → ${user.phone}. Balance: ₦${user.walletBalance.toLocaleString()}`,
       walletBalance: user.walletBalance,
     });
   } catch (e) {

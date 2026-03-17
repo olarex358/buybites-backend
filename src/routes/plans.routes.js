@@ -312,4 +312,48 @@ router.post("/smedata-sync", async (req, res) => {
 
   return res.json({ ok: true, totalSynced, results });
 });
-module.exports = router;
+// ── GET /api/plans/airtime-to-cash/rates ─────────────────────
+// Public endpoint — returns current airtime-to-cash conversion rates
+// and the recipient phone number. Override via env vars:
+//   A2C_MTN_RATE, A2C_AIRTEL_RATE, A2C_GLO_RATE, A2C_9MOBILE_RATE
+//   A2C_SEND_TO (the phone users should send airtime to)
+router.get("/airtime-to-cash/rates", (req, res) => {
+  const rates = [
+    {
+      id: "MTN",
+      label: "MTN",
+      color: "#FFCC00",
+      text: "#333",
+      rate: Number(process.env.A2C_MTN_RATE) || 0.80,
+    },
+    {
+      id: "AIRTEL",
+      label: "Airtel",
+      color: "#e40000",
+      text: "#fff",
+      rate: Number(process.env.A2C_AIRTEL_RATE) || 0.75,
+    },
+    {
+      id: "GLO",
+      label: "Glo",
+      color: "#007a3d",
+      text: "#fff",
+      rate: Number(process.env.A2C_GLO_RATE) || 0.75,
+    },
+    {
+      id: "9MOBILE",
+      label: "9mobile",
+      color: "#006633",
+      text: "#fff",
+      rate: Number(process.env.A2C_9MOBILE_RATE) || 0.70,
+    },
+  ];
+
+  return res.json({
+    ok: true,
+    rates,
+    sendTo: process.env.A2C_SEND_TO || null,  // phone number users send airtime to
+  });
+});
+
+module.exports = router;

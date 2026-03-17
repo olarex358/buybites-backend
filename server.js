@@ -16,7 +16,7 @@ app.set("trust proxy", 1);
 
 // -------------------- Security + logs --------------------
 app.use(helmet());
-app.use(morgan("dev"));
+app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 // -------------------- CORS --------------------
 const envUrls = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "")

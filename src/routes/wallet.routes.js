@@ -166,16 +166,22 @@ router.post("/korapay/webhook", express.raw({ type: "application/json" }), async
       // Still continue — we trust the signed webhook
     }
 
-    // ── Credit wallet ──
-    await User.findByIdAndUpdate(walletTx.userId, {
-      $inc: { walletBalance: walletTx.amount },
-    });
+    // ── Credit wallet (atomic to prevent double-credit if verify also fires) ──
+    // Only credit if WalletTx is still PENDING — idempotent guard
+    const credited = await WalletTx.findOneAndUpdate(
+      { _id: walletTx._id, status: "PENDING" },
+      { $set: { status: "SUCCESS" } }
+    );
 
-    // ── Mark WalletTx as SUCCESS ──
-    walletTx.status = "SUCCESS";
-    await walletTx.save();
+    if (credited) {
+      await User.findByIdAndUpdate(walletTx.userId, {
+        $inc: { walletBalance: walletTx.amount },
+      });
+      console.log(`[korapay webhook] ₦${walletTx.amount} credited to user ${walletTx.userId}`);
+    } else {
+      console.log(`[korapay webhook] Skipped — already processed: ${reference}`);
+    }
 
-    console.log(`[korapay webhook] ₦${walletTx.amount} credited to user ${walletTx.user}`);
     return res.status(200).json({ received: true });
 
   } catch (e) {
@@ -205,12 +211,17 @@ router.get("/verify/:reference", auth, async (req, res) => {
       try {
         const verify = await koraRequest("GET", `/charges/${reference}`);
         if (verify.data?.status === "success") {
-          // Webhook might have been delayed — credit now
-          await User.findByIdAndUpdate(req.user.sub, {
-            $inc: { walletBalance: walletTx.amount },
-          });
-          walletTx.status = "SUCCESS";
-          await walletTx.save();
+          // ✅ Atomic flip: only credit if we actually changed PENDING → SUCCESS
+          // Prevents double-credit if webhook fires simultaneously
+          const credited = await WalletTx.findOneAndUpdate(
+            { _id: walletTx._id, status: "PENDING" },
+            { $set: { status: "SUCCESS" } }
+          );
+          if (credited) {
+            await User.findByIdAndUpdate(req.user.sub, {
+              $inc: { walletBalance: walletTx.amount },
+            });
+          }
         }
       } catch {
         // Korapay may not have it yet — leave as PENDING
