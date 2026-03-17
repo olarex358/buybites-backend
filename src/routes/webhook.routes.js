@@ -1,26 +1,26 @@
 const router = require("express").Router();
 
-// ✅ VERY IMPORTANT (for SME validation)
+// ✅ VALIDATION ROUTE (VERY IMPORTANT)
 router.get("/smedata", (req, res) => {
-  return res.sendStatus(200);
+  res.status(200).send("OK");
 });
 
 // ✅ MAIN WEBHOOK
 router.post("/smedata", (req, res) => {
-  // ⚡ Respond FIRST (VERY IMPORTANT)
-  res.sendStatus(200);
+  // ⚡ ALWAYS RESPOND IMMEDIATELY
+  res.status(200).send("OK");
 
-  // ⚡ Then process (async, no delay to SME)
-  setImmediate(async () => {
+  // ⚡ HANDLE LOGIC AFTER RESPONSE
+  setImmediate(() => {
     try {
-      console.log("SME Webhook:", req.body);
+      console.log("SME WEBHOOK:", req.body);
 
       const { code, message, data } = req.body;
 
       if (code === "success") {
-        console.log("Data delivered:", data);
+        console.log("SUCCESS:", data);
       } else {
-        console.log("Failed:", message);
+        console.log("FAILED:", message);
       }
 
     } catch (err) {
