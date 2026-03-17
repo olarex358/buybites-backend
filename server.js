@@ -85,6 +85,7 @@ app.get("/api/health", async (req, res) => {
 });
 
 // -------------------- Routes --------------------
+app.use("/api/webhook",     require("./src/routes/webhook.routes"));
 app.use("/api/auth",        require("./src/routes/auth.routes"));
 app.use("/api/wallet",      require("./src/routes/wallet.routes"));
 app.use("/api/plans",       require("./src/routes/plans.routes"));
