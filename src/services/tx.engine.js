@@ -14,44 +14,6 @@ const { priceForTier } = require("../utils/pricing.engine");
 const { createAirtimeTx, processAirtimeTx } = require("./tx.airtime");
 const { createElectricityTx, processElectricityTx } = require("./tx.electricity");
 
-const { buyWithPeyflex } = require("./providers/peyflex.provider");
-const { buyWithSME } = require("./providers/smedata.provider");
-
-async function purchaseData({ user, network, phone, planId, type }) {
-  let result;
-  let providerUsed;
-
-  try {
-    if (type === "SME") {
-      try {
-        result = await buyWithSME({ network, phone, planId });
-        providerUsed = "SME";
-      } catch (err) {
-        console.log("SME failed, fallback to Peyflex");
-        result = await buyWithPeyflex({ network, phone, planId });
-        providerUsed = "PEYFLEX";
-      }
-    } else {
-      result = await buyWithPeyflex({ network, phone, planId });
-      providerUsed = "PEYFLEX";
-    }
-
-    // ✅ SAVE TRANSACTION
-    await Transaction.create({
-      user: user._id,
-      type: "DATA",
-      amount: result.amount,
-      status: "success",
-      provider: providerUsed // 🔥 IMPORTANT
-    });
-
-    return result;
-
-  } catch (error) {
-    throw error;
-  }
-}
-
 // ---------------------- wallet atomic ops ----------------------
 async function atomicDebit(userId, amount) {
   return User.findOneAndUpdate(

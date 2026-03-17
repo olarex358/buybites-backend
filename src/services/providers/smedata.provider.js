@@ -60,29 +60,5 @@ async function getBalance() {
   });
   return data;
 }
-const axios = require("axios");
 
-const BASE_URL = "https://smedata.ng/wp-json/api/v1/";
-
-async function buyWithSME({ network, phone, planId }) {
-  const res = await axios.get(`${BASE_URL}/data`, {
-    params: {
-      network,
-      phone,
-      data_plan: planId,
-      token: process.env.SME_API_KEY
-    }
-  });
-
-  if (res.data.code !== "success") {
-    throw new Error(res.data.message);
-  }
-
-  return {
-    status: "success",
-    amount: 0 // you already deducted wallet earlier
-  };
-}
-
-module.exports = { buyWithSME };
 module.exports = { getDataPlans, buyData, getBalance };

@@ -10,7 +10,7 @@ const DataPlan = require("../models/DataPlan");
 const { genRef } = require("../utils/ref");
 const { cleanPhone, matchesNetwork } = require("../utils/phone");
 const { peyflexClient } = require("../services/peyflex.service");
-const { network, phone, planId, type } = req.body;
+
 async function atomicDebit(userId, amount) {
   // atomic: only debit if enough balance
   return User.findOneAndUpdate(
@@ -19,13 +19,8 @@ async function atomicDebit(userId, amount) {
     { new: true }
   );
 }
-await purchaseData({
-  user,
-  network,
-  phone,
-  planId,
-  type // NEW
-});
+
+
 async function atomicCredit(userId, amount) {
   return User.findByIdAndUpdate(userId, { $inc: { walletBalance: amount } });
 }
