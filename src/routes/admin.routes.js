@@ -4,6 +4,7 @@ const User      = require("../models/User");
 const DataPlan  = require("../models/DataPlan");
 const Order     = require("../models/Order");
 const WalletTx  = require("../models/WalletTx");
+const Transaction = require("../models/Transaction");
 const { auth }  = require("../middleware/auth");
 
 function isAdminKey(req) {
@@ -244,6 +245,103 @@ router.delete("/pricing/:id", auth, requireAdminRole, async (req, res) => {
   try {
     await DataPlan.findByIdAndDelete(req.params.id);
     return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── GET /api/admin/manual-tx ─────────────────────────────────
+router.get("/manual-tx", auth, requireAdminRole, async (req, res) => {
+  try {
+    const txs = await Transaction.find({
+      status: "PROCESSING",
+      type: { $in: ["AIRTIME_TO_CASH", "EXAM_PIN", "EXAM"] }
+    }).sort({ createdAt: -1 }).populate("userId", "fullName phone walletBalance").lean();
+    
+    return res.json({ ok: true, txs });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── POST /api/admin/manual-tx/:id/approve ─────────────────────
+router.post("/manual-tx/:id/approve", auth, requireAdminRole, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { note = "", pins = [] } = req.body;
+    
+    const tx = await Transaction.findById(id);
+    if (!tx) return res.status(404).json({ ok: false, error: "Transaction not found" });
+    if (tx.status !== "PROCESSING") return res.status(400).json({ ok: false, error: "Transaction already processed" });
+
+    // 1. Update Transaction
+    tx.status = "SUCCESS";
+    tx.meta = { ...tx.meta, adminNote: note, approvedAt: new Date() };
+    if (pins.length > 0) tx.meta.pins = pins;
+    await tx.save();
+
+    // 2. Logic based on type
+    if (tx.type === "AIRTIME_TO_CASH") {
+      // Logic: User sent us airtime, now we pay them (credit their wallet)
+      const payout = tx.amount;
+      const user = await User.findByIdAndUpdate(tx.userId, { $inc: { walletBalance: payout } }, { new: true });
+      
+      // Audit trail
+      const { genRef } = require("../utils/ref");
+      await WalletTx.create({
+        userId: tx.userId,
+        type: "CREDIT",
+        amount: payout,
+        reference: genRef("A2C"),
+        status: "SUCCESS",
+        provider: "ADMIN",
+        meta: { txId: tx._id, type: "A2C_PAYOUT", note: note || "Airtime to Cash payout" }
+      });
+    }
+
+    return res.json({ ok: true, message: "Transaction approved successfully" });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── POST /api/admin/manual-tx/:id/reject ──────────────────────
+router.post("/manual-tx/:id/reject", auth, requireAdminRole, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason = "" } = req.body;
+    
+    const tx = await Transaction.findById(id);
+    if (!tx) return res.status(404).json({ ok: false, error: "Transaction not found" });
+    if (tx.status !== "PROCESSING") return res.status(400).json({ ok: false, error: "Transaction already processed" });
+
+    // 1. Update Transaction
+    tx.status = "FAILED";
+    tx.lastError = reason || "Rejected by admin";
+    await tx.save();
+
+    // 2. Logic based on type (Refund if needed)
+    if (tx.type === "EXAM_PIN" || tx.type === "EXAM") {
+      // Logic: User was already debited, now we refund
+      const refundAmt = tx.amount;
+      await User.findByIdAndUpdate(tx.userId, { $inc: { walletBalance: refundAmt } });
+      
+      const { genRef } = require("../utils/ref");
+      await WalletTx.create({
+        userId: tx.userId,
+        type: "REFUND",
+        amount: refundAmt,
+        reference: genRef("RFD"),
+        status: "SUCCESS",
+        provider: "ADMIN",
+        meta: { txId: tx._id, reason: "Admin rejected request" }
+      });
+      
+      tx.status = "REFUNDED";
+      await tx.save();
+    }
+
+    return res.json({ ok: true, message: "Transaction rejected/refunded" });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
