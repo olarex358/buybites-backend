@@ -113,9 +113,9 @@ router.post("/fund/init", auth, async (req, res) => {
 
 // ─────────────────────────────────────────────
 //  POST /api/wallet/korapay/webhook
-//  Korapay sends charge.success or charge.failed events here
+//  NOTE: RAW body is already handled in server.js
 // ─────────────────────────────────────────────
-router.post("/korapay/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+router.post("/korapay/webhook", async (req, res) => {
   try {
     // ── Verify webhook signature ──
     const signature = req.headers["x-korapay-signature"];

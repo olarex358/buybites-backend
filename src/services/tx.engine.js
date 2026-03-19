@@ -13,6 +13,8 @@ const { priceForTier } = require("../utils/pricing.engine");
 
 const { createAirtimeTx, processAirtimeTx } = require("./tx.airtime");
 const { createElectricityTx, processElectricityTx } = require("./tx.electricity");
+const { createCableTx, processCableTx } = require("./tx.cable");
+const { createA2CTx, createExamPinTx } = require("./tx.misc");
 
 // ---------------------- wallet atomic ops ----------------------
 async function atomicDebit(userId, amount) {
@@ -299,6 +301,55 @@ async function createUnifiedTx({ userId, body, headers = {} }) {
     await setFinalStatus(tx, "REFUNDED", { lastError: result.provider?.message || "Electricity failed", providerRef });
     await refundIfNeeded({ userId, tx, amount: tx.amount, reason: tx.lastError });
     return { tx, provider: result.provider, token: "" };
+  }
+
+  if (serviceType === "TV" || serviceType === "CABLE") {
+    const { tx } = await createCableTx({ userId, body: { ...meta, network: payload.network }, idempotencyKey });
+
+    const debited = await atomicDebit(userId, tx.amount);
+    if (!debited) {
+      await setFinalStatus(tx, "FAILED", { lastError: "Insufficient balance" });
+      const err = new Error("Insufficient balance");
+      err.status = 400;
+      throw err;
+    }
+    await ledgerDebit({ userId, tx, amount: tx.amount });
+
+    const result = await processCableTx(tx);
+    const providerRef = result.provider?.reference || result.provider?.data?.ref || "";
+
+    if (result.ok) {
+      await setFinalStatus(tx, "SUCCESS", { providerRef });
+      await User.findByIdAndUpdate(userId, { $inc: { totalVolume: tx.sellPrice, totalProfit: tx.profit } });
+      return { tx, provider: result.provider };
+    }
+
+    await setFinalStatus(tx, "REFUNDED", { lastError: result.provider?.message || "Cable TV failed", providerRef });
+    await refundIfNeeded({ userId, tx, amount: tx.amount, reason: tx.lastError });
+    return { tx, provider: result.provider };
+  }
+
+  if (serviceType === "AIRTIME_TO_CASH") {
+    const { tx, sendTo } = await createA2CTx({ userId, body: { ...meta, network: payload.network }, idempotencyKey });
+    // This is a manual review process, so we just return the tx
+    return { tx, sendTo, provider: null };
+  }
+
+  if (serviceType === "EXAM_PIN" || serviceType === "EXAM") {
+    const { tx } = await createExamPinTx({ userId, body: { ...meta }, idempotencyKey });
+    
+    // We debit the user immediately for EXAM_PIN
+    const debited = await atomicDebit(userId, tx.amount);
+    if (!debited) {
+      await setFinalStatus(tx, "FAILED", { lastError: "Insufficient balance" });
+      const err = new Error("Insufficient balance");
+      err.status = 400;
+      throw err;
+    }
+    await ledgerDebit({ userId, tx, amount: tx.amount });
+
+    // Since EXAM_PIN is currently manual, it stays in PROCESSING
+    return { tx, provider: null };
   }
 
   const err = new Error(`Unsupported serviceType: ${serviceType}`);

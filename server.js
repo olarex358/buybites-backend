@@ -48,18 +48,32 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-// -------------------- Paystack webhook (RAW body first) --------------------
+// -------------------- Webhooks (RAW body first) --------------------
+// We must handle webhooks BEFORE express.json() to verify signatures correctly
 app.use(
   "/api/paystack/webhook",
   express.raw({ type: "application/json" }),
   require("./src/routes/paystack.webhook")
 );
 
+app.use(
+  "/api/wallet/korapay/webhook",
+  express.raw({ type: "application/json" }),
+  // We handle it directly using the router or a manual call
+  // Since router already defines "/korapay/webhook", we use a shim
+  (req, res, next) => {
+    // If we mount a router at its exact endpoint, we must adjust the path or the router
+    // This is a common trick:
+    req.url = "/korapay/webhook"; 
+    require("./src/routes/wallet.routes")(req, res, next);
+  }
+);
+
 // -------------------- JSON + sanitize --------------------
 app.use(express.json({ limit: "300kb" }));
 app.use(mongoSanitize());
 
-// ✅ FIX: response middleware applied ONCE here (was applied twice before)
+// Single clean import for response utility
 app.use(response);
 
 // -------------------- Rate limit --------------------
