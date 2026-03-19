@@ -18,9 +18,9 @@ async function sendWhatsappOtp({ to, otp }) {
     api_key: process.env.TERMII_API_KEY,
     to,              // "2348012345678"
     from,            // sender/device name
-    sms: String(otp),// OTP only (4-6 digits)
+    sms: `Your OTP is ${otp}. Valid for 5 minutes.`,
     type: "plain",
-    channel: "whatsapp_otp",
+    channel: process.env.TERMII_CHANNEL || "generic",
   };
 
   const r = await api.post("/api/sms/send", payload);

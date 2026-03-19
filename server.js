@@ -56,17 +56,10 @@ app.use(
   require("./src/routes/paystack.webhook")
 );
 
+// ✅ Fix: Only handle the raw body at this path. The router will be used later.
 app.use(
   "/api/wallet/korapay/webhook",
-  express.raw({ type: "application/json" }),
-  // We handle it directly using the router or a manual call
-  // Since router already defines "/korapay/webhook", we use a shim
-  (req, res, next) => {
-    // If we mount a router at its exact endpoint, we must adjust the path or the router
-    // This is a common trick:
-    req.url = "/korapay/webhook"; 
-    require("./src/routes/wallet.routes")(req, res, next);
-  }
+  express.raw({ type: "application/json" })
 );
 
 // -------------------- JSON + sanitize --------------------

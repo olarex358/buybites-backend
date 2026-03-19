@@ -16,10 +16,10 @@ async function createA2CTx({ userId, body, idempotencyKey }) {
     userId,
     type: "AIRTIME_TO_CASH",
     provider: "MANUAL",
-    sellPrice: 0, // No charge to user yet (we're giving them money)
+    sellPrice: 0,
     baseCost: 0,
     profit: 0,
-    amount: 0, 
+    amount: Number(expectedPayout || 0),
     reference,
     idempotencyKey: idempotencyKey || "",
     status: "PROCESSING",
