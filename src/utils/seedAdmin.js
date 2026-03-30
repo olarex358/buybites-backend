@@ -18,7 +18,7 @@ async function seedAdmin() {
     return;
   }
 
-  const pinHash = await bcrypt.hash(pin, 10);
+  const pinHash = await bcrypt.hash(pin, 12);
 
   await User.create({
     phone,

@@ -9,16 +9,18 @@ const { createUnifiedTx } = require("../services/tx.engine");
 router.get("/discos", auth, (req, res) => {
   return res.success({
     discos: [
-      { id: "IKEDC",  name: "Ikeja Electric",        state: "Lagos"     },
-      { id: "EKEDC",  name: "Eko Electric",           state: "Lagos"     },
-      { id: "AEDC",   name: "Abuja Electric",         state: "FCT"       },
-      { id: "IBEDC",  name: "Ibadan Electric",        state: "Oyo/Osun"  },
-      { id: "PHED",   name: "Port Harcourt Electric", state: "Rivers"    },
-      { id: "KEDCO",  name: "Kano Electric",          state: "Kano"      },
-      { id: "JED",    name: "Jos Electric",           state: "Plateau"   },
-      { id: "KAEDCO", name: "Kaduna Electric",        state: "Kaduna"    },
-      { id: "BEDC",   name: "Benin Electric",         state: "Edo/Delta" },
-      { id: "ENDC",   name: "Enugu Electric",         state: "Enugu"     },
+      // FIX: IDs now match frontend BuyElectricity.jsx DISCO list exactly
+      { id: "IKEDC",  name: "Ikeja Electric",         state: "Lagos"        },
+      { id: "EKEDC",  name: "Eko Electric",            state: "Lagos"        },
+      { id: "AEDC",   name: "Abuja Electric",          state: "FCT/Abuja"   },
+      { id: "PHEDC",  name: "Port Harcourt Electric",  state: "Rivers"       },
+      { id: "ENDC",   name: "Enugu Electric",          state: "Enugu"        },
+      { id: "IBEDC",  name: "Ibadan Electric",         state: "Oyo/Osun"    },
+      { id: "KEDCO",  name: "Kano Electric",           state: "Kano"         },
+      { id: "EEDC",   name: "Enugu Electric (EEDC)",   state: "South-East"  },
+      { id: "JEDC",   name: "Jos Electric",            state: "Plateau"      },
+      { id: "KAEDCO", name: "Kaduna Electric",         state: "Kaduna"       },
+      { id: "BEDC",   name: "Benin Electric",          state: "Edo/Delta"   },
     ],
   }, "Discos fetched");
 });

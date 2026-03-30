@@ -290,13 +290,6 @@ router.post("/otp/request", authLimiter, async (req, res, next) => {
 
     const code = await createOtp({ phone, purpose: parsed.purpose, ttlMinutes: OTP_TTL_MINUTES });
 
-    const label =
-      parsed.purpose === "RESET_PIN"
-        ? "PIN reset"
-        : parsed.purpose === "RESET_DEVICE"
-        ? "device reset"
-        : "verification";
-
     await sendWhatsappOtp({ to: phone, otp: code });
 
     return res.json({ ok: true, message: "OTP sent", cooldown: OTP_COOLDOWN_SECONDS });

@@ -111,85 +111,6 @@ router.post("/fund/init", auth, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────
-//  POST /api/wallet/korapay/webhook
-//  NOTE: RAW body is already handled in server.js
-// ─────────────────────────────────────────────
-router.post("/korapay/webhook", async (req, res) => {
-  try {
-    // ── Verify webhook signature ──
-    const signature = req.headers["x-korapay-signature"];
-    if (!signature || !WEBHOOK_SECRET) {
-      return res.status(400).json({ error: "Missing signature" });
-    }
-
-    const body    = req.body.toString("utf8");
-    const hash    = crypto
-      .createHmac("sha256", WEBHOOK_SECRET)
-      .update(body)
-      .digest("hex");
-
-    if (hash !== signature) {
-      console.warn("[korapay webhook] Invalid signature");
-      return res.status(401).json({ error: "Invalid signature" });
-    }
-
-    const event = JSON.parse(body);
-    console.log("[korapay webhook] event:", event.event, event.data?.reference);
-
-    // ── Only process successful charges ──
-    if (event.event !== "charge.success") {
-      return res.status(200).json({ received: true });
-    }
-
-    const { reference, amount, status } = event.data || {};
-    if (!reference || status !== "success") {
-      return res.status(200).json({ received: true });
-    }
-
-    // ── Find matching WalletTx ──
-    const walletTx = await WalletTx.findOne({ reference, status: "PENDING" });
-    if (!walletTx) {
-      // Already processed or doesn't exist — return 200 so Kora stops retrying
-      return res.status(200).json({ received: true });
-    }
-
-    // ── Optional: re-verify with Korapay API (belt + suspenders) ──
-    try {
-      const verify = await koraRequest("GET", `/charges/${reference}`);
-      if (verify.data?.status !== "success") {
-        console.warn("[korapay webhook] Re-verify failed:", verify.data?.status);
-        return res.status(200).json({ received: true });
-      }
-    } catch (verifyErr) {
-      console.warn("[korapay webhook] Re-verify error:", verifyErr.message);
-      // Still continue — we trust the signed webhook
-    }
-
-    // ── Credit wallet (atomic to prevent double-credit if verify also fires) ──
-    // Only credit if WalletTx is still PENDING — idempotent guard
-    const credited = await WalletTx.findOneAndUpdate(
-      { _id: walletTx._id, status: "PENDING" },
-      { $set: { status: "SUCCESS" } }
-    );
-
-    if (credited) {
-      await User.findByIdAndUpdate(walletTx.userId, {
-        $inc: { walletBalance: walletTx.amount },
-      });
-      console.log(`[korapay webhook] ₦${walletTx.amount} credited to user ${walletTx.userId}`);
-    } else {
-      console.log(`[korapay webhook] Skipped — already processed: ${reference}`);
-    }
-
-    return res.status(200).json({ received: true });
-
-  } catch (e) {
-    console.error("[korapay webhook] Error:", e.message);
-    // Always return 200 to Korapay so they don't retry indefinitely
-    return res.status(200).json({ received: true });
-  }
-});
 
 // ─────────────────────────────────────────────
 //  GET /api/wallet/verify/:reference
@@ -238,6 +159,26 @@ router.get("/verify/:reference", auth, async (req, res) => {
     });
   } catch (e) {
     res.fail(e.message || "Verification failed", 500);
+  }
+});
+
+
+// ─────────────────────────────────────────────
+//  GET /api/wallet/history
+//  Returns recent FUND wallet transactions for the current user.
+//  FIX: Wallet.jsx was loading from /api/tx/my which only has service transactions
+//  (DATA/AIRTIME etc.), not wallet top-ups which live in WalletTx.
+// ─────────────────────────────────────────────
+router.get("/history", auth, async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const txs = await WalletTx.find({ userId: req.user.sub })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    res.success({ transactions: txs }, "Wallet history fetched");
+  } catch (e) {
+    res.fail(e.message || "Could not fetch wallet history", 500);
   }
 });
 

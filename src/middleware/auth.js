@@ -7,9 +7,19 @@ function auth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = payload; // should contain: sub, role, tier
+
+    // FIX: Reject tokens that are missing essential fields (malformed payloads)
+    if (!payload.sub) {
+      return res.status(401).json({ ok: false, error: "Invalid token payload" });
+    }
+
+    req.user = payload; // contains: sub, role, tier, phone, name
     next();
-  } catch {
+  } catch (err) {
+    // Differentiate expired vs malformed for better debugging
+    if (err.name === "TokenExpiredError") {
+      return res.status(401).json({ ok: false, error: "Token expired", code: "TOKEN_EXPIRED" });
+    }
     return res.status(401).json({ ok: false, error: "Invalid token" });
   }
 }

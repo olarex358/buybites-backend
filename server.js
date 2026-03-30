@@ -8,7 +8,7 @@ const mongoSanitize = require("express-mongo-sanitize");
 const { connectDB } = require("./src/config/db");
 const { apiLimiter } = require("./src/middleware/rateLimit");
 const { notFound, errorHandler } = require("./src/middleware/error");
-const { response } = require("./src/middleware/response"); // ✅ single clean import
+const { response } = require("./src/middleware/response");
 const { seedAdmin } = require("./src/utils/seedAdmin");
 
 const app = express();
@@ -49,17 +49,21 @@ app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
 // -------------------- Webhooks (RAW body first) --------------------
-// We must handle webhooks BEFORE express.json() to verify signatures correctly
+// Paystack webhook — needs raw body for HMAC signature verification
 app.use(
   "/api/paystack/webhook",
   express.raw({ type: "application/json" }),
   require("./src/routes/paystack.webhook")
 );
 
-// ✅ Fix: Only handle the raw body at this path. The router will be used later.
+// FIX: Korapay webhook — must attach raw body middleware AND the route handler together.
+// Previously the raw middleware was registered here but the route handler was buried inside
+// /api/wallet (wallet.routes.js), meaning the parsed Buffer was gone by the time it arrived.
+// Solution: handle the Korapay webhook as a standalone top-level route before express.json().
 app.use(
   "/api/wallet/korapay/webhook",
-  express.raw({ type: "application/json" })
+  express.raw({ type: "application/json" }),
+  require("./src/routes/korapay.webhook")
 );
 
 // -------------------- JSON + sanitize --------------------
@@ -102,7 +106,7 @@ app.use("/api/peyflex",     require("./src/routes/peyflex.routes"));
 app.use("/api/admin",       require("./src/routes/admin.routes"));
 app.use("/api/airtime",     require("./src/routes/airtime.routes"));
 app.use("/api/electricity", require("./src/routes/electricity.routes"));
-app.use("/api/cable", require("./src/routes/cable.routes"));
+app.use("/api/cable",       require("./src/routes/cable.routes"));
 
 // -------------------- Errors --------------------
 app.use(notFound);

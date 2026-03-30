@@ -80,23 +80,38 @@ router.post("/setup", async (req, res) => {
 // ✅ Returns EXACT fields AdminDashboard.jsx expects
 router.get("/stats", auth, requireAdminRole, async (req, res) => {
   try {
+    // FIX: Count both Order (legacy) and Transaction (new tx.engine) models together
     const [
-      users, orders, walletTx, activePlans,
-      delivered, processing, failed, refunded,
+      users, legacyOrders, txOrders, walletTx, activePlans,
+      legacyDelivered, txSuccess,
+      legacyProcessing, txProcessing,
+      legacyFailed, txFailed,
+      legacyRefunded, txRefunded,
     ] = await Promise.all([
       User.countDocuments({ role: { $ne: "ADMIN" } }),
       Order.countDocuments({}),
-      WalletTx.countDocuments({}),
+      Transaction.countDocuments({}),
+      WalletTx.countDocuments({ type: "FUND", status: "SUCCESS" }),
       DataPlan.countDocuments({ isActive: true }),
       Order.countDocuments({ status: "DELIVERED" }),
+      Transaction.countDocuments({ status: "SUCCESS" }),
       Order.countDocuments({ status: "PROCESSING" }),
+      Transaction.countDocuments({ status: "PROCESSING" }),
       Order.countDocuments({ status: "FAILED" }),
+      Transaction.countDocuments({ status: "FAILED" }),
       Order.countDocuments({ status: "REFUNDED" }),
+      Transaction.countDocuments({ status: "REFUNDED" }),
     ]);
 
     return res.json({ ok: true, stats: {
-      users, orders, walletTx, activePlans,
-      delivered, processing, failed, refunded,
+      users,
+      orders:     legacyOrders + txOrders,
+      walletTx,
+      activePlans,
+      delivered:  legacyDelivered + txSuccess,
+      processing: legacyProcessing + txProcessing,
+      failed:     legacyFailed + txFailed,
+      refunded:   legacyRefunded + txRefunded,
     }});
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
@@ -159,10 +174,26 @@ router.patch("/users/:id/wallet", auth, requireAdminRole, async (req, res) => {
     const txType = type.toUpperCase() === "DEBIT" ? "DEBIT" : "CREDIT";
     const delta  = txType === "DEBIT" ? -Math.abs(Number(amount)) : Math.abs(Number(amount));
 
-    const user = await User.findByIdAndUpdate(
-      req.params.id, { $inc: { walletBalance: delta } }, { new: true }
-    ).select("fullName phone walletBalance");
-    if (!user) return res.status(404).json({ ok: false, error: "User not found" });
+    // FIX: For DEBIT, use atomic findOneAndUpdate with balance guard to prevent going negative
+    let user;
+    if (txType === "DEBIT") {
+      user = await User.findOneAndUpdate(
+        { _id: req.params.id, walletBalance: { $gte: Math.abs(Number(amount)) } },
+        { $inc: { walletBalance: delta } },
+        { new: true }
+      ).select("fullName phone walletBalance");
+      if (!user) {
+        // Check if user exists vs insufficient balance
+        const exists = await User.findById(req.params.id).select("_id walletBalance");
+        if (!exists) return res.status(404).json({ ok: false, error: "User not found" });
+        return res.status(400).json({ ok: false, error: `Insufficient balance. Current: ₦${exists.walletBalance.toLocaleString()}` });
+      }
+    } else {
+      user = await User.findByIdAndUpdate(
+        req.params.id, { $inc: { walletBalance: delta } }, { new: true }
+      ).select("fullName phone walletBalance");
+      if (!user) return res.status(404).json({ ok: false, error: "User not found" });
+    }
 
     // ✅ Audit trail: record every admin adjustment as a WalletTx
     const { genRef } = require("../utils/ref");
@@ -329,7 +360,7 @@ router.post("/manual-tx/:id/reject", auth, requireAdminRole, async (req, res) =>
       const { genRef } = require("../utils/ref");
       await WalletTx.create({
         userId: tx.userId,
-        type: "REFUND",
+        type: "CREDIT",
         amount: refundAmt,
         reference: genRef("RFD"),
         status: "SUCCESS",
