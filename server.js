@@ -49,17 +49,12 @@ app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
 // -------------------- Webhooks (RAW body first) --------------------
-// Paystack webhook — needs raw body for HMAC signature verification
 app.use(
   "/api/paystack/webhook",
   express.raw({ type: "application/json" }),
   require("./src/routes/paystack.webhook")
 );
 
-// FIX: Korapay webhook — must attach raw body middleware AND the route handler together.
-// Previously the raw middleware was registered here but the route handler was buried inside
-// /api/wallet (wallet.routes.js), meaning the parsed Buffer was gone by the time it arrived.
-// Solution: handle the Korapay webhook as a standalone top-level route before express.json().
 app.use(
   "/api/wallet/korapay/webhook",
   express.raw({ type: "application/json" }),
@@ -69,8 +64,6 @@ app.use(
 // -------------------- JSON + sanitize --------------------
 app.use(express.json({ limit: "300kb" }));
 app.use(mongoSanitize());
-
-// Single clean import for response utility
 app.use(response);
 
 // -------------------- Rate limit --------------------
@@ -113,10 +106,12 @@ app.use(notFound);
 app.use(errorHandler);
 
 // -------------------- Start --------------------
+// DYNAMIC PORT FOR CPANEL
 const PORT = process.env.PORT || 5000;
 
 async function start() {
   try {
+    // Ensuring MongoDB connects before listening
     await connectDB();
     await seedAdmin();
     app.listen(PORT, () => {
@@ -124,7 +119,8 @@ async function start() {
     });
   } catch (e) {
     console.error("❌ Startup failed:", e.message || e);
-    process.exit(1);
+    // On cPanel, don't necessarily exit(1) as Passenger might try to restart it
+    // process.exit(1); 
   }
 }
 
