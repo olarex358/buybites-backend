@@ -1,98 +1,54 @@
 const { z } = require("zod");
 
 const User = require("../models/User");
-const WalletTx = require("../models/WalletTx");
 const Transaction = require("../models/Transaction");
 const DataPlan = require("../models/DataPlan");
 
 const { genRef } = require("../utils/ref");
 const { cleanPhone, matchesNetwork } = require("../utils/phone");
-const { peyflexClient } = require("./peyflex.service");
-const { buyData: smeDataBuy } = require("./providers/smedata.provider");
+const { peyflexData, smedataData } = require("./providers/data.adapter");
 const { priceForTier } = require("../utils/pricing.engine");
 
-const { createAirtimeTx, processAirtimeTx } = require("./tx.airtime");
-const { createElectricityTx, processElectricityTx } = require("./tx.electricity");
-const { createCableTx, processCableTx } = require("./tx.cable");
+const { createAirtimeTx } = require("./tx.airtime");
+const { createElectricityTx } = require("./tx.electricity");
+const { createCableTx } = require("./tx.cable");
 const { createA2CTx, createExamPinTx } = require("./tx.misc");
+const { atomicDebit, ledgerDebit } = require("./tx.lifecycle");
+const { recordTransactionEvent } = require("./tx.events");
 
-// ---------------------- wallet atomic ops ----------------------
-async function atomicDebit(userId, amount) {
-  return User.findOneAndUpdate(
-    { _id: userId, walletBalance: { $gte: amount } },
-    { $inc: { walletBalance: -amount } },
-    { new: true }
-  );
-}
+// ---------------------- DATA creation ----------------------
 
-async function atomicCredit(userId, amount) {
-  return User.findByIdAndUpdate(userId, { $inc: { walletBalance: amount } });
-}
-
-async function ledgerDebit({ userId, tx, amount }) {
-  const debitRef = `DEB_${tx.reference}`;
-  // deterministic reference prevents duplication
-  const exists = await WalletTx.findOne({ reference: debitRef }).select("_id");
-  if (exists) return;
-
-  await WalletTx.create({
-    userId,
-    type: "DEBIT",
-    amount,
-    reference: debitRef,
-    status: "SUCCESS",
-    meta: { txId: String(tx._id), reference: tx.reference, type: tx.type, ...tx.meta },
-  });
-}
-
-async function refundIfNeeded({ userId, tx, amount, reason }) {
-  const refundRef = `CR_${tx.reference}`;
-  const alreadyRefunded = await WalletTx.findOne({ reference: refundRef }).select("_id");
-  if (alreadyRefunded) return;
-
-  await atomicCredit(userId, amount);
-  await WalletTx.create({
-    userId,
-    type: "CREDIT",
-    amount,
-    reference: refundRef,
-    status: "SUCCESS",
-    meta: { txId: String(tx._id), reference: tx.reference, reason },
-  });
-}
-
-function assertTransition(from, to) {
-  if (from !== "PROCESSING") {
-    const err = new Error(`Invalid tx transition: ${from} -> ${to}`);
-    err.status = 409;
-    throw err;
-  }
-  if (!["SUCCESS", "FAILED", "REFUNDED"].includes(to)) {
-    const err = new Error(`Invalid tx status: ${to}`);
-    err.status = 400;
-    throw err;
-  }
-}
-
-async function setFinalStatus(tx, to, { lastError = "", providerRef = "" } = {}) {
-  assertTransition(tx.status, to);
-  tx.status = to;
-  if (lastError) tx.lastError = String(lastError);
-  if (providerRef) tx.providerRef = String(providerRef);
-  await tx.save();
-}
-
-// ---------------------- DATA flow ----------------------
-async function createDataTx({ userId, network, mobile_number, plan_code, idempotencyKey }) {
+/**
+ * Creates a DATA transaction.
+ *
+ * Important:
+ * - Customer-facing price comes from priceForTier().
+ * - Provider cost remains separate.
+ * - Campaign discounts affect the customer transaction amount.
+ * - Peyflex receives the provider plan/network information,
+ *   NOT the customer's discounted selling price.
+ */
+async function createDataTx({
+  userId,
+  network,
+  mobile_number,
+  plan_code,
+  idempotencyKey,
+}) {
   const body = z
     .object({
       network: z.string().min(2),
       mobile_number: z.string().min(8),
       plan_code: z.string().min(2),
     })
-    .parse({ network, mobile_number, plan_code });
+    .parse({
+      network,
+      mobile_number,
+      plan_code,
+    });
 
   const phone11 = cleanPhone(body.mobile_number);
+
   if (!phone11) {
     const err = new Error("Invalid phone");
     err.status = 400;
@@ -114,119 +70,349 @@ async function createDataTx({ userId, network, mobile_number, plan_code, idempot
   const user = await User.findById(userId).select("tier");
   const tier = user?.tier || "USER";
 
+  /*
+   * Customer pricing is calculated here.
+   *
+   * This is where campaign/tier pricing can affect what
+   * the customer pays.
+   */
   const pricing = await priceForTier({
     serviceType: "DATA",
     tier,
     network: String(body.network).toUpperCase().trim(),
     productCode: String(body.plan_code).trim(),
+
     defaultSellPrice: Number(plan.sellPrice),
+
     defaultBaseCost: Number(plan.costPrice || 0),
-  });
 
-  // Anti double-tap: if same idempotencyKey exists, reuse
-  if (idempotencyKey) {
-    const existing = await Transaction.findOne({ userId, idempotencyKey }).sort({ createdAt: -1 });
-    if (existing) return { tx: existing, networkMatch: matchesNetwork(phone11, body.network), deduped: true };
-  }
-
-  const reference = genRef("TX");
-  const tx = await Transaction.create({
-    userId,
-    type: "DATA",
-    provider: "PEYFLEX",
-    tierAtPurchase: tier,
-    sellPrice: pricing.sellPrice,
-    baseCost: pricing.baseCost,
-    profit: pricing.profit,
-    amount: pricing.sellPrice,
-    reference,
-    idempotencyKey: idempotencyKey || "",
-    status: "PROCESSING",
-    meta: {
-      network: body.network,
-      mobile_number: phone11,
-      plan_code: body.plan_code,
-      planTitle: plan.title,
-      networkMatch: matchesNetwork(phone11, body.network),
+    defaultTierPrices: {
+      USER: Number(plan.tierPrices?.USER || plan.sellPrice || 0),
+      BASIC: Number(plan.tierPrices?.BASIC || plan.sellPrice || 0),
+      SILVER: Number(plan.tierPrices?.SILVER || plan.sellPrice || 0),
+      GOLD: Number(plan.tierPrices?.GOLD || plan.sellPrice || 0),
+      PLATINUM: Number(
+        plan.tierPrices?.PLATINUM || plan.sellPrice || 0
+      ),
     },
   });
 
-  // debit + ledger
-  const debited = await atomicDebit(userId, tx.amount);
-  if (!debited) {
-    await setFinalStatus(tx, "FAILED", { lastError: "Insufficient balance" });
-    const err = new Error("Insufficient balance");
-    err.status = 400;
-    throw err;
-  }
-  await ledgerDebit({ userId, tx, amount: tx.amount });
+  // Idempotency protection.
+  if (idempotencyKey) {
+    const existing = await Transaction.findOne({
+      userId,
+      idempotencyKey,
+    }).sort({ createdAt: -1 });
 
-  // provider call with small retries
-  // provider call with small retries
-  const api = peyflexClient();
-  let providerRes = null;
-  let lastErr = "";
-  const planProvider = String(plan.provider || "PEYFLEX").toUpperCase();
-
-  for (let i = 1; i <= 3; i++) {
-    try {
-      tx.retries = i - 1;
-      await tx.save();
-
-      if (planProvider === "SMEDATA") {
-        providerRes = await smeDataBuy({
-          network: plan.peyflexNetwork || String(body.network).toLowerCase(),
-          planId: String(plan.plan_code || body.plan_code).replace(/^SME_/, ""),
-          phone: phone11,
-          reference: tx.reference,
-        });
-      } else {
-        const r = await api.post("/api/data/purchase/", {
-          network: body.network,
-          mobile_number: phone11,
-          plan_code: body.plan_code,
-          reference: tx.reference,
-        });
-        providerRes = r.data;
-      }
-
-      break;
-    } catch (e) {
-      lastErr = e?.response?.data ? JSON.stringify(e.response.data) : e.message;
-      await new Promise((r) => setTimeout(r, 600 * i));
+    if (existing) {
+      return {
+        tx: existing,
+        networkMatch: matchesNetwork(phone11, body.network),
+        deduped: true,
+      };
     }
   }
-  const txt = JSON.stringify(providerRes || "").toLowerCase();
-  const ok = providerRes && (txt.includes("success") || txt.includes("delivered"));
-  const providerRef = providerRes?.reference || providerRes?.ref || "";
 
-  if (ok) {
-    await setFinalStatus(tx, "SUCCESS", { providerRef });
-    await User.findByIdAndUpdate(userId, { $inc: { totalVolume: tx.sellPrice, totalProfit: tx.profit } });
-    return { tx, provider: providerRes, networkMatch: tx.meta.networkMatch };
+  const planProvider = String(
+    plan.provider || "PEYFLEX"
+  ).toUpperCase();
+
+  const reference = genRef("TX");
+
+  /*
+   * IMPORTANT:
+   *
+   * plan.peyflexNetwork is the provider-specific network identifier.
+   *
+   * Example:
+   * MTN -> mtn_gifting_data
+   * MTN -> mtn_data_share
+   *
+   * We store it in transaction metadata so the background processor
+   * can use the correct provider value later.
+   */
+  const peyflexNetwork =
+    plan.peyflexNetwork ||
+    String(body.network).toLowerCase().trim();
+
+  const tx = await Transaction.create({
+    userId,
+
+    type: "DATA",
+
+    provider: planProvider,
+
+    tierAtPurchase: tier,
+
+    // Customer pricing
+    sellPrice: pricing.sellPrice,
+
+    // Provider/base cost
+    baseCost: pricing.baseCost,
+
+    // Profit based on customer price vs base cost
+    profit: pricing.profit,
+
+    // Amount actually debited from customer's wallet
+    amount: pricing.sellPrice,
+
+    reference,
+
+    idempotencyKey: idempotencyKey || "",
+
+    status: "PROCESSING",
+
+    processingStage: "CREATED",
+
+    statusMessage:
+      "Your data purchase has been received and is being processed.",
+
+    meta: {
+      network: body.network,
+
+      mobile_number: phone11,
+
+      plan_code: body.plan_code,
+
+      planTitle: plan.title,
+
+      planProvider,
+
+      pricingSource: pricing.pricingSource,
+
+      pricingMode: pricing.pricingMode,
+
+      marginPercent: pricing.marginPercent,
+
+      /*
+       * Provider-specific network.
+       *
+       * This must be used when sending the transaction
+       * to Peyflex.
+       */
+      peyflexNetwork,
+
+      networkMatch: matchesNetwork(
+        phone11,
+        body.network
+      ),
+    },
+  });
+
+  // Debit the customer's wallet using the customer price.
+  const debited = await atomicDebit(
+    userId,
+    tx.amount
+  );
+
+  if (!debited) {
+    tx.status = "FAILED";
+    tx.processingStage = "FAILED";
+
+    tx.statusMessage =
+      "Insufficient wallet balance.";
+
+    tx.lastError =
+      "Insufficient balance";
+
+    tx.completedAt = new Date();
+
+    await tx.save();
+
+    await recordTransactionEvent(tx, {
+      status: "FAILED",
+      processingStage: "FAILED",
+      message: tx.statusMessage,
+      source: "SYSTEM",
+    });
+
+    const err = new Error(
+      "Insufficient balance"
+    );
+
+    err.status = 400;
+
+    throw err;
   }
 
-  await setFinalStatus(tx, "REFUNDED", { lastError: providerRes ? "Provider failed" : (lastErr || "Provider error"), providerRef });
-  await refundIfNeeded({ userId, tx, amount: tx.amount, reason: tx.lastError });
-  return { tx, provider: providerRes, networkMatch: tx.meta.networkMatch };
+  await ledgerDebit({
+    userId,
+    tx,
+    amount: tx.amount,
+  });
+
+  await recordTransactionEvent(tx, {
+    status: "PROCESSING",
+    processingStage: "CREATED",
+    message: tx.statusMessage,
+    source: "SYSTEM",
+  });
+
+  return {
+    tx,
+    networkMatch: tx.meta.networkMatch,
+  };
 }
 
-// ---------------------- Unified entry ----------------------
+// ---------------------- DATA provider processing ----------------------
+
 /**
- * Unified entry point for ALL services
- * body: { serviceType, network, productCode, meta }
+ * Processes a previously-created DATA transaction.
+ *
+ * IMPORTANT:
+ *
+ * tx.meta.network
+ *     = customer's normal network identifier, e.g. "MTN"
+ *
+ * tx.meta.peyflexNetwork
+ *     = provider-specific Peyflex identifier,
+ *       e.g. "mtn_gifting_data"
+ *
+ * Peyflex MUST receive tx.meta.peyflexNetwork.
  */
-async function createUnifiedTx({ userId, body, headers = {} }) {
+async function processDataTx(tx) {
+  const network = tx.meta?.network;
+
+  const phone = tx.meta?.mobile_number;
+
+  const planCode = tx.meta?.plan_code;
+
+  const provider = String(
+    tx.provider ||
+      tx.meta?.planProvider ||
+      "PEYFLEX"
+  ).toUpperCase();
+
+  /*
+   * This is the important correction.
+   *
+   * Use the provider-specific network saved when
+   * the transaction was created.
+   *
+   * Fallback is retained for older transactions that
+   * may not have peyflexNetwork stored.
+   */
+  const peyflexNetwork =
+    tx.meta?.peyflexNetwork ||
+    String(network || "").toLowerCase().trim();
+
+  let providerRes;
+
+  let providerMeta = {};
+
+  // ---------------------- SME DATA ----------------------
+
+  if (provider === "SMEDATA") {
+    const wrapped = await smedataData({
+      network:
+        tx.meta?.peyflexNetwork ||
+        String(network || "").toLowerCase(),
+
+      planId: String(planCode || "")
+        .replace(/^SME_/, ""),
+
+      phone,
+
+      reference: tx.reference,
+    });
+
+    providerRes = wrapped.data;
+
+    providerMeta = wrapped.providerMeta;
+
+  // ---------------------- PEYFLEX DATA ----------------------
+
+  } else {
+    const wrapped = await peyflexData({
+      /*
+       * FIX:
+       *
+       * Previously this was:
+       *
+       * network
+       *
+       * which could send "MTN".
+       *
+       * Peyflex needs the provider-specific value:
+       *
+       * mtn_gifting_data
+       * mtn_data_share
+       */
+      network: peyflexNetwork,
+
+      mobile_number: phone,
+
+      plan_code: planCode,
+
+      reference: tx.reference,
+    });
+
+    providerRes = wrapped.data;
+    
+
+    providerMeta = wrapped.providerMeta;
+    console.log(
+  "[PEYFLEX DATA RESPONSE]",
+  JSON.stringify(providerRes, null, 2)
+);
+  }
+
+  /*
+   * Normalize provider success detection.
+   */
+  const txt = JSON.stringify(
+    providerRes || ""
+  ).toLowerCase();
+
+  const ok =
+    providerRes &&
+    (
+      providerRes.success === true ||
+      providerRes.status === "success" ||
+      txt.includes("success") ||
+      txt.includes("delivered")
+    );
+
+  return {
+    ok,
+
+    provider: providerRes,
+
+    providerMeta,
+  };
+}
+
+// ---------------------- Unified creation entry ----------------------
+
+/**
+ * Creates and funds a transaction quickly.
+ *
+ * Provider processing is deliberately moved to tx.processor.js
+ * so the API doesn't hold the user's request open while
+ * Peyflex/other providers respond.
+ */
+async function createUnifiedTx({
+  userId,
+  body,
+  headers = {},
+}) {
   const payload = z
     .object({
       serviceType: z.string().min(2),
+
       network: z.string().optional(),
+
       productCode: z.string().optional(),
+
       meta: z.any().optional(),
     })
     .parse(body);
 
-  const serviceType = String(payload.serviceType).toUpperCase().trim();
+  const serviceType =
+    String(payload.serviceType)
+      .toUpperCase()
+      .trim();
+
   const meta = payload.meta || {};
 
   const idempotencyKey =
@@ -235,126 +421,334 @@ async function createUnifiedTx({ userId, body, headers = {} }) {
     headers["x-idempotency_key"] ||
     "";
 
-  // Fast dedupe for clients that resend requests
   if (idempotencyKey) {
-    const existing = await Transaction.findOne({ userId, idempotencyKey }).sort({ createdAt: -1 });
-    if (existing) return { tx: existing, provider: null, token: "", deduped: true };
+    const existing = await Transaction.findOne({
+      userId,
+      idempotencyKey,
+    }).sort({ createdAt: -1 });
+
+    if (existing) {
+      return {
+        tx: existing,
+        provider: null,
+        token: "",
+        deduped: true,
+      };
+    }
   }
+
+  // ---------------------- DATA ----------------------
 
   if (serviceType === "DATA") {
     return createDataTx({
       userId,
-      network: payload.network || meta.network,
-      mobile_number: meta.mobile_number || meta.phone || meta.recipient,
-      plan_code: payload.productCode || meta.plan_code || meta.productCode,
+
+      network:
+        payload.network ||
+        meta.network,
+
+      mobile_number:
+        meta.mobile_number ||
+        meta.phone ||
+        meta.recipient,
+
+      plan_code:
+        payload.productCode ||
+        meta.plan_code ||
+        meta.productCode,
+
       idempotencyKey,
     });
   }
 
-  if (serviceType === "AIRTIME") {
-    const { tx } = await createAirtimeTx({ userId, body: { network: payload.network, ...meta }, idempotencyKey });
+  // ---------------------- AIRTIME ----------------------
 
-    const debited = await atomicDebit(userId, tx.amount);
+  if (serviceType === "AIRTIME") {
+    const { tx } = await createAirtimeTx({
+      userId,
+
+      body: {
+        network: payload.network,
+        ...meta,
+      },
+
+      idempotencyKey,
+    });
+
+    const debited = await atomicDebit(
+      userId,
+      tx.amount
+    );
+
     if (!debited) {
-      await setFinalStatus(tx, "FAILED", { lastError: "Insufficient balance" });
-      const err = new Error("Insufficient balance");
+      tx.status = "FAILED";
+      tx.processingStage = "FAILED";
+
+      tx.statusMessage =
+        "Insufficient wallet balance.";
+
+      tx.lastError =
+        "Insufficient balance";
+
+      tx.completedAt = new Date();
+
+      await tx.save();
+
+      const err = new Error(
+        "Insufficient balance"
+      );
+
       err.status = 400;
+
       throw err;
     }
-    await ledgerDebit({ userId, tx, amount: tx.amount });
 
-    const result = await processAirtimeTx(tx);
-    const providerRef = result.provider?.reference || result.provider?.data?.ref || "";
+    await ledgerDebit({
+      userId,
+      tx,
+      amount: tx.amount,
+    });
 
-    if (result.ok) {
-      await setFinalStatus(tx, "SUCCESS", { providerRef });
-      await User.findByIdAndUpdate(userId, { $inc: { totalVolume: tx.sellPrice, totalProfit: tx.profit } });
-      return { tx, provider: result.provider };
-    }
+    await recordTransactionEvent(tx, {
+      status: "PROCESSING",
+      processingStage: "CREATED",
+      message: tx.statusMessage,
+      source: "SYSTEM",
+    });
 
-    await setFinalStatus(tx, "REFUNDED", { lastError: result.provider?.message || "Airtime failed", providerRef });
-    await refundIfNeeded({ userId, tx, amount: tx.amount, reason: tx.lastError });
-    return { tx, provider: result.provider };
+    return {
+      tx,
+      provider: null,
+    };
   }
+
+  // ---------------------- ELECTRICITY ----------------------
 
   if (serviceType === "ELECTRICITY") {
-    const { tx } = await createElectricityTx({ userId, body: { ...meta, network: payload.network }, idempotencyKey });
+    const { tx } =
+      await createElectricityTx({
+        userId,
 
-    const debited = await atomicDebit(userId, tx.amount);
+        body: {
+          ...meta,
+          network: payload.network,
+        },
+
+        idempotencyKey,
+      });
+
+    const debited = await atomicDebit(
+      userId,
+      tx.amount
+    );
+
     if (!debited) {
-      await setFinalStatus(tx, "FAILED", { lastError: "Insufficient balance" });
-      const err = new Error("Insufficient balance");
+      tx.status = "FAILED";
+      tx.processingStage = "FAILED";
+
+      tx.statusMessage =
+        "Insufficient wallet balance.";
+
+      tx.lastError =
+        "Insufficient balance";
+
+      tx.completedAt = new Date();
+
+      await tx.save();
+
+      const err = new Error(
+        "Insufficient balance"
+      );
+
       err.status = 400;
+
       throw err;
     }
-    await ledgerDebit({ userId, tx, amount: tx.amount });
 
-    const result = await processElectricityTx(tx);
-    const providerRef = result.provider?.reference || result.provider?.data?.ref || "";
+    await ledgerDebit({
+      userId,
+      tx,
+      amount: tx.amount,
+    });
 
-    if (result.ok) {
-      await setFinalStatus(tx, "SUCCESS", { providerRef });
-      await User.findByIdAndUpdate(userId, { $inc: { totalVolume: tx.sellPrice, totalProfit: tx.profit } });
-      return { tx, provider: result.provider, token: result.token || "" };
-    }
+    await recordTransactionEvent(tx, {
+      status: "PROCESSING",
+      processingStage: "CREATED",
+      message: tx.statusMessage,
+      source: "SYSTEM",
+    });
 
-    await setFinalStatus(tx, "REFUNDED", { lastError: result.provider?.message || "Electricity failed", providerRef });
-    await refundIfNeeded({ userId, tx, amount: tx.amount, reason: tx.lastError });
-    return { tx, provider: result.provider, token: "" };
+    return {
+      tx,
+      provider: null,
+    };
   }
 
-  if (serviceType === "TV" || serviceType === "CABLE") {
-    const { tx } = await createCableTx({ userId, body: { ...meta, network: payload.network }, idempotencyKey });
+  // ---------------------- CABLE / TV ----------------------
 
-    const debited = await atomicDebit(userId, tx.amount);
+  if (
+    serviceType === "TV" ||
+    serviceType === "CABLE"
+  ) {
+    const { tx } =
+      await createCableTx({
+        userId,
+
+        body: {
+          ...meta,
+          network: payload.network,
+        },
+
+        idempotencyKey,
+      });
+
+    const debited = await atomicDebit(
+      userId,
+      tx.amount
+    );
+
     if (!debited) {
-      await setFinalStatus(tx, "FAILED", { lastError: "Insufficient balance" });
-      const err = new Error("Insufficient balance");
+      tx.status = "FAILED";
+      tx.processingStage = "FAILED";
+
+      tx.statusMessage =
+        "Insufficient wallet balance.";
+
+      tx.lastError =
+        "Insufficient balance";
+
+      tx.completedAt = new Date();
+
+      await tx.save();
+
+      const err = new Error(
+        "Insufficient balance"
+      );
+
       err.status = 400;
+
       throw err;
     }
-    await ledgerDebit({ userId, tx, amount: tx.amount });
 
-    const result = await processCableTx(tx);
-    const providerRef = result.provider?.reference || result.provider?.data?.ref || "";
+    await ledgerDebit({
+      userId,
+      tx,
+      amount: tx.amount,
+    });
 
-    if (result.ok) {
-      await setFinalStatus(tx, "SUCCESS", { providerRef });
-      await User.findByIdAndUpdate(userId, { $inc: { totalVolume: tx.sellPrice, totalProfit: tx.profit } });
-      return { tx, provider: result.provider };
-    }
+    await recordTransactionEvent(tx, {
+      status: "PROCESSING",
+      processingStage: "CREATED",
+      message: tx.statusMessage,
+      source: "SYSTEM",
+    });
 
-    await setFinalStatus(tx, "REFUNDED", { lastError: result.provider?.message || "Cable TV failed", providerRef });
-    await refundIfNeeded({ userId, tx, amount: tx.amount, reason: tx.lastError });
-    return { tx, provider: result.provider };
+    return {
+      tx,
+      provider: null,
+    };
   }
 
-  if (serviceType === "AIRTIME_TO_CASH") {
-    const { tx, sendTo } = await createA2CTx({ userId, body: { ...meta, network: payload.network }, idempotencyKey });
-    // This is a manual review process, so we just return the tx
-    return { tx, sendTo, provider: null };
+  // ---------------------- AIRTIME TO CASH ----------------------
+
+  if (
+    serviceType === "AIRTIME_TO_CASH"
+  ) {
+    const { tx, sendTo } =
+      await createA2CTx({
+        userId,
+
+        body: {
+          ...meta,
+          network: payload.network,
+        },
+
+        idempotencyKey,
+      });
+
+    return {
+      tx,
+      sendTo,
+      provider: null,
+    };
   }
 
-  if (serviceType === "EXAM_PIN" || serviceType === "EXAM") {
-    const { tx } = await createExamPinTx({ userId, body: { ...meta }, idempotencyKey });
-    
-    // We debit the user immediately for EXAM_PIN
-    const debited = await atomicDebit(userId, tx.amount);
+  // ---------------------- EXAM PIN ----------------------
+
+  if (
+    serviceType === "EXAM_PIN" ||
+    serviceType === "EXAM"
+  ) {
+    const { tx } =
+      await createExamPinTx({
+        userId,
+
+        body: {
+          ...meta,
+        },
+
+        idempotencyKey,
+      });
+
+    const debited = await atomicDebit(
+      userId,
+      tx.amount
+    );
+
     if (!debited) {
-      await setFinalStatus(tx, "FAILED", { lastError: "Insufficient balance" });
-      const err = new Error("Insufficient balance");
+      tx.status = "FAILED";
+      tx.processingStage = "FAILED";
+
+      tx.statusMessage =
+        "Insufficient wallet balance.";
+
+      tx.lastError =
+        "Insufficient balance";
+
+      tx.completedAt = new Date();
+
+      await tx.save();
+
+      const err = new Error(
+        "Insufficient balance"
+      );
+
       err.status = 400;
+
       throw err;
     }
-    await ledgerDebit({ userId, tx, amount: tx.amount });
 
-    // Since EXAM_PIN is currently manual, it stays in PROCESSING
-    return { tx, provider: null };
+    await ledgerDebit({
+      userId,
+      tx,
+      amount: tx.amount,
+    });
+
+    await recordTransactionEvent(tx, {
+      status: "PROCESSING",
+      processingStage: "CREATED",
+      message: tx.statusMessage,
+      source: "SYSTEM",
+    });
+
+    return {
+      tx,
+      provider: null,
+    };
   }
 
-  const err = new Error(`Unsupported serviceType: ${serviceType}`);
+  // ---------------------- UNSUPPORTED ----------------------
+
+  const err = new Error(
+    `Unsupported serviceType: ${serviceType}`
+  );
+
   err.status = 400;
+
   throw err;
 }
 
-module.exports = { createUnifiedTx };
+module.exports = {
+  createUnifiedTx,
+  processDataTx,
+};

@@ -1,8 +1,9 @@
 const Transaction = require("../models/Transaction");
 const User = require("../models/User");
 const { priceForTier } = require("../utils/pricing.engine");
-const { verifyCableIUC, buyCable } = require("./providers/peyflex.provider");
+const { getProvider } = require("./provider.registry");
 const { newReference } = require("./tx.utils");
+const { recommend } = require("./provider.router");
 
 async function createCableTx({ userId, body, idempotencyKey }) {
   const user = await User.findById(userId).select("tier");
@@ -19,6 +20,9 @@ async function createCableTx({ userId, body, idempotencyKey }) {
     throw err;
   }
 
+  const route = await recommend({ service: "CABLE" });
+  const selectedProvider = route?.provider || "PEYFLEX";
+
   const p = await priceForTier({
     serviceType: "TV",
     tier,
@@ -33,7 +37,7 @@ async function createCableTx({ userId, body, idempotencyKey }) {
   const tx = await Transaction.create({
     userId,
     type: "TV",
-    provider: "PEYFLEX",
+    provider: selectedProvider,
     tierAtPurchase: tier,
     sellPrice: p.sellPrice,
     baseCost: p.baseCost,
@@ -57,14 +61,21 @@ async function processCableTx(tx) {
     reference: tx.reference,
   };
 
-  const providerRes = await buyCable(payload);
+  const adapter = getProvider(tx.provider || "PEYFLEX", "CABLE");
+  if (!adapter) {
+    const err = new Error("No active cable provider is configured.");
+    err.code = "NO_PROVIDER";
+    throw err;
+  }
+  const wrapped = await adapter.cable(payload);
+  const providerRes = wrapped.data;
 
   const ok =
     providerRes?.status === "success" ||
     providerRes?.success === true ||
     String(providerRes?.message || "").toLowerCase().includes("success");
 
-  return { ok, provider: providerRes };
+  return { ok, provider: providerRes, providerMeta: wrapped.providerMeta };
 }
 
 module.exports = { createCableTx, processCableTx };

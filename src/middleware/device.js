@@ -1,14 +1,12 @@
+// src/middleware/device.js
 function requireDeviceId(req, res, next) {
-  const deviceId = req.headers["x-device-id"];
+  // Check for the header, but provide a "web-session" fallback if missing
+  const deviceId = req.headers["x-device-id"] || "web-session";
 
-  if (!deviceId || String(deviceId).trim().length < 10) {
-    return res.status(400).json({
-      ok: false,
-      error: "Missing device id. Please refresh the app."
-    });
-  }
-
+  // We attach it to the request so downstream functions don't crash,
+  // but we no longer validate the length or existence.
   req.deviceId = String(deviceId).trim();
+  
   next();
 }
 

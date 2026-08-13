@@ -1,8 +1,9 @@
 const Transaction = require("../models/Transaction");
 const User = require("../models/User");
 const { priceForTier } = require("../utils/pricing.engine");
-const { verifyElectricity, buyElectricity } = require("./providers/peyflex.provider");
+const { getProvider } = require("./provider.registry");
 const { newReference } = require("./tx.utils");
+const { recommend } = require("./provider.router");
 
 async function verifyMeter({ disco, meterNumber, meterType }) {
   if (!disco || !meterNumber || !meterType) {
@@ -10,7 +11,10 @@ async function verifyMeter({ disco, meterNumber, meterType }) {
     err.status = 400;
     throw err;
   }
-  return verifyElectricity({ disco, meterNumber, meterType });
+  const adapter = getProvider("PEYFLEX", "ELECTRICITY");
+  if (!adapter) throw Object.assign(new Error("No active electricity provider is configured."), { code: "NO_PROVIDER" });
+  const wrapped = await adapter.electricityVerify({ disco, meterNumber, meterType });
+  return wrapped.data;
 }
 
 async function createElectricityTx({ userId, body, idempotencyKey }) {
@@ -29,6 +33,9 @@ async function createElectricityTx({ userId, body, idempotencyKey }) {
     throw err;
   }
 
+  const route = await recommend({ service: "ELECTRICITY" });
+  const selectedProvider = route?.provider || "PEYFLEX";
+
   const p = await priceForTier({
     serviceType: "ELECTRICITY",
     tier,
@@ -43,7 +50,7 @@ async function createElectricityTx({ userId, body, idempotencyKey }) {
   const tx = await Transaction.create({
     userId,
     type: "ELECTRICITY",
-    provider: "PEYFLEX",
+    provider: selectedProvider,
     tierAtPurchase: tier,
     sellPrice: p.sellPrice,
     baseCost: p.baseCost,
@@ -72,7 +79,14 @@ async function processElectricityTx(tx) {
     reference: tx.reference,
   };
 
-  const providerRes = await buyElectricity(payload);
+  const adapter = getProvider(tx.provider || "PEYFLEX", "ELECTRICITY");
+  if (!adapter) {
+    const err = new Error("No active electricity provider is configured.");
+    err.code = "NO_PROVIDER";
+    throw err;
+  }
+  const wrapped = await adapter.electricity(payload);
+  const providerRes = wrapped.data;
 
   const ok =
     providerRes?.status === "success" ||
@@ -81,7 +95,7 @@ async function processElectricityTx(tx) {
 
   const token = providerRes?.token || providerRes?.data?.token || "";
 
-  return { ok, provider: providerRes, token };
+  return { ok, provider: providerRes, token, providerMeta: wrapped.providerMeta };
 }
 
 module.exports = { verifyMeter, createElectricityTx, processElectricityTx };

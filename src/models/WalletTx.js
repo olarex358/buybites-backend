@@ -8,6 +8,11 @@ const WalletTxSchema = new mongoose.Schema(
     reference: { type: String, required: true, unique: true },
     status:    { type: String, enum: ["PENDING", "SUCCESS", "FAILED"], default: "PENDING" },
     provider:  { type: String, default: "" },
+    providerReference: { type: String, default: "", index: true },
+    fee: { type: Number, default: 0 },
+    amountPaid: { type: Number, default: 0 },
+    creditedAt: { type: Date, default: null, index: true },
+    idempotencyKey: { type: String, default: "", index: true },
     meta:      { type: Object, default: {} },
   },
   { timestamps: true }

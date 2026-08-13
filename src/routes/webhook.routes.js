@@ -1,86 +1,65 @@
 const router = require("express").Router();
 const Order = require("../models/Order");
-const User = require("../models/User");
-const WalletTx = require("../models/WalletTx");
+const Transaction = require("../models/Transaction");
+const {
+  finalizeSuccess,
+  finalizeRefund,
+} = require("../services/tx.lifecycle");
 
-// Helper to refund atomic
-async function atomicCredit(userId, amount) {
-  return User.findByIdAndUpdate(userId, { $inc: { walletBalance: amount } });
-}
-
-// ✅ VALIDATION ROUTE (VERY IMPORTANT)
+// Validation route
 router.get("/smedata", (req, res) => {
   res.status(200).send("OK");
 });
 
-// ✅ MAIN WEBHOOK
+// SMEData webhook
+// New NEX transactions are resolved through the unified Transaction model.
+// The legacy Order fallback is kept temporarily so old BuyBites transactions
+// are not abandoned during migration.
 router.post("/smedata", (req, res) => {
-  // ⚡ ALWAYS RESPOND IMMEDIATELY
+  // Respond immediately so the provider does not wait on MongoDB work.
   res.status(200).send("OK");
 
-  // ⚡ HANDLE LOGIC AFTER RESPONSE
   setImmediate(async () => {
     try {
-      console.log("SME WEBHOOK:", req.body);
-
-      const { code, message, data } = req.body;
+      const { code, message, data } = req.body || {};
       if (!data) return;
 
-      const ref = data.reference || data.request_id; // Added safeguard in case they use request_id
+      const ref = data.reference || data.request_id;
       if (!ref) return;
 
-      const order = await Order.findOne({
-        $or: [{ orderRef: ref }, { providerRef: ref }]
+      const tx = await Transaction.findOne({
+        $or: [{ reference: ref }, { providerRef: ref }],
       });
 
-      if (!order) {
-        console.log("Webhook error: Order not found for ref:", ref);
+      if (tx) {
+        if (tx.status !== "PROCESSING") return;
+
+        if (code === "success") {
+          await finalizeSuccess(tx, { providerRef: ref });
+        } else {
+          await finalizeRefund(tx, message || "Provider failed via webhook");
+        }
         return;
       }
 
-      if (code === "success") {
-        console.log("SME WEBHOOK SUCCESS:", data);
-        if (order.status !== "PROCESSING") {
-          console.log(`Order ${order.orderRef} is already ${order.status}, skipping.`);
-          return;
-        }
+      // Legacy BuyBites Order support during migration.
+      const order = await Order.findOne({
+        $or: [{ orderRef: ref }, { providerRef: ref }],
+      });
 
+      if (!order || order.status !== "PROCESSING") return;
+
+      if (code === "success") {
         order.status = "DELIVERED";
         order.providerRef = ref;
         await order.save();
-
       } else {
-        console.log("SME WEBHOOK FAILED:", message);
-        if (order.status !== "PROCESSING") {
-          console.log(`Order ${order.orderRef} is already ${order.status}, skipping refund.`);
-          return;
-        }
-
-        // Refund user
         order.status = "REFUNDED";
         order.lastError = message || "Provider failed via webhook";
         await order.save();
-
-        const refundRef = `CR_WH_${order.orderRef}`;
-        const alreadyRefunded = await WalletTx.findOne({ reference: refundRef }).select("_id");
-        
-        if (!alreadyRefunded) {
-          await atomicCredit(order.userId, order.amount);
-          
-          await WalletTx.create({
-            userId: order.userId,
-            type: "CREDIT",
-            amount: order.amount,
-            reference: refundRef,
-            status: "SUCCESS",
-            meta: { orderId: String(order._id), orderRef: order.orderRef, reason: order.lastError }
-          });
-          console.log(`Refunded user ${order.userId} amount ${order.amount} for failed order ${order.orderRef}`);
-        }
       }
-
     } catch (err) {
-      console.error("Webhook error:", err);
+      console.error("[SME webhook] error:", err.message);
     }
   });
 });

@@ -9,10 +9,18 @@ const PricingSchema = new mongoose.Schema(
       index: true,
     },
 
-    network: { type: String, default: "", index: true },      // e.g. MTN / GLO / AEDC / DSTV
-    productCode: { type: String, default: "", index: true },  // e.g. plan_code / package_id
+    network: { type: String, default: "", index: true },
+    productCode: { type: String, default: "", index: true },
 
-    // manual tier pricing ✅
+    // MANUAL = explicit tier prices.
+    // COST_PLUS = calculate missing tier prices from provider cost + margin.
+    pricingMode: {
+      type: String,
+      enum: ["MANUAL", "COST_PLUS"],
+      default: "MANUAL",
+      index: true,
+    },
+
     prices: {
       USER: { type: Number, default: 0 },
       BASIC: { type: Number, default: 0 },
@@ -21,14 +29,27 @@ const PricingSchema = new mongoose.Schema(
       PLATINUM: { type: Number, default: 0 },
     },
 
-    // optional: override cost too
+    // Provider cost snapshot for fixed-price products.
     baseCost: { type: Number, default: 0 },
+
+    // COST_PLUS controls.
+    marginPercent: { type: Number, default: 0, min: 0, max: 100 },
+    fixedFee: { type: Number, default: 0, min: 0 },
+    minProfit: { type: Number, default: 0, min: 0 },
+    roundingUnit: { type: Number, default: 1, min: 1 },
+
+    // If true and a manual price is below cost + minimum profit,
+    // NEX refuses the sale instead of silently losing money.
+    enforceProfitFloor: { type: Boolean, default: true },
 
     isActive: { type: Boolean, default: true, index: true },
   },
   { timestamps: true }
 );
 
-PricingSchema.index({ serviceType: 1, network: 1, productCode: 1 }, { unique: true });
+PricingSchema.index(
+  { serviceType: 1, network: 1, productCode: 1 },
+  { unique: true }
+);
 
 module.exports = mongoose.model("Pricing", PricingSchema);

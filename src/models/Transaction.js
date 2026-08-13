@@ -41,9 +41,25 @@ const TransactionSchema = new mongoose.Schema(
       index: true
     },
 
+    // NEX transaction lifecycle metadata. The public status stays simple while
+    // processingStage tells the UI/admin system exactly what is happening.
+    processingStage: {
+      type: String,
+      default: "CREATED",
+      index: true
+    },
+    statusMessage: { type: String, default: "" },
     providerRef: { type: String, default: "" },
     retries: { type: Number, default: 0 },
+    requeryAttempts: { type: Number, default: 0 },
     lastError: { type: String, default: "" },
+    lastProviderAttemptAt: { type: Date, default: null },
+    lastRequeryAt: { type: Date, default: null },
+    nextCheckAt: { type: Date, default: null, index: true },
+    manualReviewAt: { type: Date, default: null },
+    completedAt: { type: Date, default: null },
+    processingLockId: { type: String, default: "" },
+    processingLockedAt: { type: Date, default: null },
 
     // Flexible payload
     meta: { type: Object, default: {} },
@@ -53,6 +69,7 @@ const TransactionSchema = new mongoose.Schema(
 
 TransactionSchema.index({ userId: 1, createdAt: -1 });
 TransactionSchema.index({ type: 1, status: 1, createdAt: -1 });
+TransactionSchema.index({ status: 1, processingStage: 1, createdAt: 1 });
 TransactionSchema.index({ userId: 1, idempotencyKey: 1 });
 
 module.exports = mongoose.model("Transaction", TransactionSchema);

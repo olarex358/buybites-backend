@@ -11,6 +11,18 @@ function pfClient() {
   });
 }
 
+// ── PEYFLEX WALLET BALANCE ───────────────────────────────────
+// GET /api/wallet/balance/
+// Returns the current Peyflex wallet credit.
+async function getPeyflexBalance() {
+  const { data } = await pfClient().get("/api/wallet/balance/");
+
+  return {
+    balance: Number(data?.wallet_credit || 0),
+    raw: data,
+  };
+}
+
 // ── AIRTIME ──────────────────────────────────────────────────
 // POST /api/airtime/topup/
 async function buyAirtime({ network, phone, amount, reference }) {
@@ -20,6 +32,7 @@ async function buyAirtime({ network, phone, amount, reference }) {
     amount,
     reference,
   });
+
   return data;
 }
 
@@ -29,23 +42,32 @@ async function verifyElectricity({ disco, meterNumber, meterType }) {
   const { data } = await pfClient().get("/api/electricity/verify/", {
     params: {
       meter_number: meterNumber,
-      disco:        disco,
-      meter_type:   meterType,   // PREPAID or POSTPAID
+      disco: disco,
+      meter_type: meterType,
     },
   });
+
   return data;
 }
 
 // POST /api/electricity/recharge/
-async function buyElectricity({ disco, meterNumber, meterType, amount, phone, reference }) {
+async function buyElectricity({
+  disco,
+  meterNumber,
+  meterType,
+  amount,
+  phone,
+  reference,
+}) {
   const { data } = await pfClient().post("/api/electricity/recharge/", {
     disco,
     meter_number: meterNumber,
-    meter_type:   meterType,
+    meter_type: meterType,
     amount,
     phone,
     reference,
   });
+
   return data;
 }
 
@@ -56,22 +78,31 @@ async function verifyCableIUC({ provider, smartcardNumber }) {
     provider,
     smartcard_number: smartcardNumber,
   });
+
   return data;
 }
 
 // POST /api/cable/recharge/
-async function buyCable({ provider, smartcardNumber, planCode, phone, reference }) {
+async function buyCable({
+  provider,
+  smartcardNumber,
+  planCode,
+  phone,
+  reference,
+}) {
   const { data } = await pfClient().post("/api/cable/recharge/", {
     provider,
     smartcard_number: smartcardNumber,
-    plan_code:        planCode,
+    plan_code: planCode,
     phone,
     reference,
   });
+
   return data;
 }
 
 module.exports = {
+  getPeyflexBalance,
   buyAirtime,
   verifyElectricity,
   buyElectricity,

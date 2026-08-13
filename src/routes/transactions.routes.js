@@ -3,9 +3,12 @@ const { z } = require("zod");
 
 const { auth } = require("../middleware/auth");
 const Transaction = require("../models/Transaction");
+const TransactionEvent = require("../models/TransactionEvent");
+const { recordTransactionEvent } = require("../services/tx.events");
 
 // Unified engine
 const { createUnifiedTx } = require("../services/tx.engine");
+const { scheduleTransactionProcessing } = require("../services/tx.processor");
 
 // Helpers
 const normalizeType = (t) => {
@@ -58,6 +61,11 @@ router.post("/create", auth, async (req, res, next) => {
       body: normalized,
       headers: req.headers,
     });
+
+    // Provider work happens in the background so the API can respond quickly.
+    if (out.tx?.status === "PROCESSING" && !out.deduped) {
+      scheduleTransactionProcessing(out.tx._id);
+    }
 
     return res.success(
       { tx: out.tx, provider: out.provider, token: out.token || "", deduped: !!out.deduped },
@@ -170,6 +178,69 @@ router.get("/summary", auth, async (req, res, next) => {
 });
 
 // -----------------------------
+// GET /api/tx/:id/status
+// -----------------------------
+router.get("/:id/status", auth, async (req, res, next) => {
+  try {
+    const tx = await Transaction.findOne({
+      _id: req.params.id,
+      userId: req.user.sub,
+    })
+      .select("_id type status processingStage statusMessage reference providerRef completedAt nextCheckAt requeryAttempts lastRequeryAt lastError meta token")
+      .lean();
+
+    if (!tx) return res.fail("Transaction not found", 404);
+
+    return res.success(
+      {
+        status: tx.status,
+        processingStage: tx.processingStage,
+        statusMessage: tx.statusMessage,
+        amount: tx.amount,
+        sellPrice: tx.sellPrice,
+        reference: tx.reference,
+        providerRef: tx.providerRef,
+        completedAt: tx.completedAt,
+        nextCheckAt: tx.nextCheckAt,
+        requeryAttempts: tx.requeryAttempts || 0,
+        lastRequeryAt: tx.lastRequeryAt,
+        lastError: tx.lastError || "",
+        token: tx.token || tx.meta?.token || "",
+      },
+      "Transaction status fetched"
+    );
+  } catch (e) {
+    next(e);
+  }
+});
+
+// -----------------------------
+// GET /api/tx/:id/timeline
+// -----------------------------
+router.get("/:id/timeline", auth, async (req, res, next) => {
+  try {
+    const exists = await Transaction.exists({
+      _id: req.params.id,
+      userId: req.user.sub,
+    });
+
+    if (!exists) return res.fail("Transaction not found", 404);
+
+    const events = await TransactionEvent.find({
+      transactionId: req.params.id,
+      userId: req.user.sub,
+    })
+      .sort({ createdAt: 1 })
+      .limit(50)
+      .lean();
+
+    return res.success({ events }, "Transaction timeline fetched");
+  } catch (e) {
+    next(e);
+  }
+});
+
+// -----------------------------
 // GET /api/tx/:id (NEW - receipt)
 // -----------------------------
 router.get("/:id", auth, async (req, res, next) => {
@@ -187,7 +258,7 @@ router.get("/:id", auth, async (req, res, next) => {
 });
 
 // -----------------------------
-// POST /api/tx/:id/requery (NEW - stub)
+// POST /api/tx/:id/requery
 // -----------------------------
 router.post("/:id/requery", auth, async (req, res, next) => {
   try {
@@ -198,9 +269,83 @@ router.post("/:id/requery", auth, async (req, res, next) => {
 
     if (!tx) return res.fail("Transaction not found", 404);
 
-    // Provider requery depends on Peyflex endpoint.
-    // Keep stable API for frontend now.
-    return res.fail("Requery not implemented yet for this provider", 501, { tx });
+    if (tx.status !== "PROCESSING") {
+      return res.success(
+        { status: tx.status, processingStage: tx.processingStage },
+        "Transaction already has a final status"
+      );
+    }
+
+    const lastRequery = tx.lastRequeryAt ? new Date(tx.lastRequeryAt).getTime() : 0;
+    if (lastRequery && Date.now() - lastRequery < 10000) {
+      return res.fail("Please wait a few seconds before checking again.", 429, {
+        retryAfterMs: 10000 - (Date.now() - lastRequery),
+      });
+    }
+
+    tx.lastRequeryAt = new Date();
+    tx.requeryAttempts = Number(tx.requeryAttempts || 0) + 1;
+    await tx.save();
+
+    const { requeryTransaction } = require("../services/provider.requery");
+    const result = await requeryTransaction(tx);
+
+    if (!result.supported) {
+      tx.processingStage = "PROVIDER_UNKNOWN";
+      tx.statusMessage = "The provider does not expose a direct status check. NEX will continue monitoring automatically.";
+      tx.nextCheckAt = new Date(Date.now() + 60 * 1000);
+      await tx.save();
+
+      await recordTransactionEvent(tx, {
+        status: "PROCESSING",
+        processingStage: "PROVIDER_UNKNOWN",
+        message: tx.statusMessage,
+        source: "REQUERY",
+      });
+
+      return res.fail(
+        "This provider does not expose a configured status-requery method yet.",
+        501,
+        { supported: false, status: tx.status, processingStage: tx.processingStage }
+      );
+    }
+
+    if (result.status === "SUCCESS") {
+      const { finalizeSuccess } = require("../services/tx.lifecycle");
+      await finalizeSuccess(tx, {
+        providerRef: result.providerRef,
+        token: result.token,
+      });
+    } else if (result.status === "FAILED") {
+      const { finalizeRefund } = require("../services/tx.lifecycle");
+      await finalizeRefund(tx, result.message || "Provider confirmed the transaction failed.");
+    } else {
+      tx.processingStage = "PROVIDER_UNKNOWN";
+      tx.statusMessage = "The provider has not confirmed completion yet.";
+      tx.nextCheckAt = new Date(Date.now() + 60 * 1000);
+      await tx.save();
+
+      await recordTransactionEvent(tx, {
+        status: "PROCESSING",
+        processingStage: "PROVIDER_UNKNOWN",
+        message: tx.statusMessage,
+        source: "REQUERY",
+        providerRef: tx.providerRef,
+        meta: { manual: true },
+      });
+    }
+
+    return res.success(
+      {
+        status: tx.status,
+        processingStage: tx.processingStage,
+        statusMessage: tx.statusMessage,
+        reference: tx.reference,
+        providerRef: tx.providerRef,
+        token: result.token || tx.meta?.token || "",
+      },
+      "Transaction status checked"
+    );
   } catch (e) {
     next(e);
   }
